@@ -1,0 +1,875 @@
+from __future__ import annotations
+
+import asyncio
+import inspect
+import io
+import re
+import time
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
+from openai import AsyncOpenAI
+from openai.types.images_response import ImagesResponse
+
+from astrbot.api import logger
+
+from .gitee_sizes import normalize_size_text, ratio_defaults_from_sizes, size_to_ratio
+from .image_format import guess_image_mime_and_ext
+
+
+def _looks_like_size(s: str) -> bool:
+    return bool(re.fullmatch(r"\d{2,5}x\d{2,5}", (s or "").strip()))
+
+
+def resolution_to_size(resolution: str) -> str | None:
+    r = (resolution or "").strip().upper()
+    if not r or r == "AUTO":
+        return None
+    if r in {"1K", "1024"}:
+        return "1024x1024"
+    if r in {"2K", "2048"}:
+        return "2048x2048"
+    if r in {"4K", "4096"}:
+        return "4096x4096"
+    if _looks_like_size(r.lower()):
+        return r.lower()
+    return None
+
+
+def _bytes_to_upload_file(image_bytes: bytes, filename: str) -> io.BytesIO:
+    bio = io.BytesIO(image_bytes)
+    bio.name = filename
+    return bio
+
+
+def _is_client_closed_error(exc: Exception) -> bool:
+    msg = f"{exc!r} {exc}".lower()
+    if "client has been closed" in msg:
+        return True
+    cur: Exception | None = exc
+    for _ in range(3):
+        nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+        if not isinstance(nxt, Exception):
+            break
+        cur = nxt
+        if "client has been closed" in f"{cur!r} {cur}".lower():
+            return True
+    return False
+
+
+async def _resolve_awaitable(value: object) -> object:
+    while inspect.isawaitable(value):
+        value = await value
+    return value
+
+
+def build_proxy_http_client(proxy_url: str):
+    proxy = str(proxy_url or "").strip()
+    if not proxy:
+        return None
+    try:
+        import httpx
+    except Exception:
+        return None
+
+    for kwargs in ({"proxy": proxy}, {"proxies": proxy}):
+        try:
+            return httpx.AsyncClient(**kwargs)
+        except TypeError:
+            continue
+        except Exception as e:
+            logger.warning("[openai_compat] failed to build proxy client: %s", e)
+            return None
+    return None
+
+
+def normalize_openai_compat_base_url(raw: str) -> str:
+    """Normalize OpenAI-compatible base_url.
+
+    Users may paste either:
+    - https://api.x.ai
+    - https://api.x.ai/v1
+    - https://ai.gitee.com
+    - https://ai.gitee.com/v1
+    - https://proxy.example.com/openai/v1
+
+    The OpenAI client expects base_url to include /v1 (unless the path already contains /v1/).
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    s = s.rstrip("/")
+
+    lower = s.lower()
+    for suffix in (
+        "/v1/chat/completions",
+        "/chat/completions",
+        "/v1/images/generations",
+        "/images/generations",
+        "/v1/images/edits",
+        "/images/edits",
+        "/v1/images/edit",
+        "/images/edit",
+        "/v1/images",
+        "/images",
+    ):
+        if lower.endswith(suffix):
+            s = s[: -len(suffix)].rstrip("/")
+            break
+
+    # If user already included /v1 in the path anywhere (e.g. /openai/v1), keep as-is.
+    if re.search(r"/v1($|/)", s):
+        return s
+
+    try:
+        parts = urlsplit(s)
+        if parts.scheme and parts.netloc:
+            path = (parts.path or "").rstrip("/") + "/v1"
+            return urlunsplit((parts.scheme, parts.netloc, path, "", "")).rstrip("/")
+    except Exception:
+        pass
+
+    return f"{s}/v1"
+
+
+def is_aiwork_base_url(base_url: str) -> bool:
+    try:
+        host = urlsplit(str(base_url or "").strip()).netloc.lower()
+    except Exception:
+        host = ""
+    return host == "aiwork.fans" or host.endswith(".aiwork.fans")
+
+
+def build_aiwork_edit_form_fields(
+    *,
+    model: str,
+    prompt: str,
+    size: str,
+    extra_body: dict | None = None,
+) -> dict[str, str]:
+    fields: dict[str, object] = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "response_format": "b64_json",
+        "quality": "auto",
+        "n": "1",
+    }
+    fields.update(extra_body or {})
+    return {k: str(v) for k, v in fields.items()}
+
+
+def build_aiwork_edit_file_fields(
+    images: list[bytes],
+) -> list[tuple[str, tuple[str, bytes, str]]]:
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    for idx, image_bytes in enumerate(images, start=1):
+        mime, ext = guess_image_mime_and_ext(image_bytes)
+        files.append(("image[]", (f"input_{idx}.{ext}", image_bytes, mime)))
+    return files
+
+
+def _multipart_file_summary(
+    files: dict[str, tuple[str, bytes, str]] | list[tuple[str, tuple[str, bytes, str]]],
+) -> object:
+    if isinstance(files, dict):
+        return {k: (v[0], len(v[1]), v[2]) for k, v in files.items()}
+    return [(k, v[0], len(v[1]), v[2]) for k, v in files]
+
+
+def _build_collage(images: list[bytes]) -> bytes:
+    """Combine multiple reference images into a single image for backends that only accept 1 input image.
+
+    Uses Pillow if available; otherwise falls back to the first image.
+    """
+    if not images:
+        return b""
+    if len(images) == 1:
+        return images[0]
+
+    try:
+        from PIL import Image as PILImage
+    except Exception:
+        return images[0]
+
+    pil_images: list[PILImage.Image] = []
+    for b in images:
+        try:
+            pil_images.append(PILImage.open(io.BytesIO(b)).convert("RGB"))
+        except Exception:
+            continue
+
+    if not pil_images:
+        return images[0]
+
+    target_h = 768
+    resized: list[PILImage.Image] = []
+    for im in pil_images:
+        w, h = im.size
+        if h <= 0:
+            continue
+        new_w = max(1, int(w * (target_h / h)))
+        resized.append(im.resize((new_w, target_h)))
+
+    if not resized:
+        return images[0]
+
+    total_w = sum(im.size[0] for im in resized)
+    canvas = PILImage.new("RGB", (total_w, target_h), color=(0, 0, 0))
+    x = 0
+    for im in resized:
+        canvas.paste(im, (x, 0))
+        x += im.size[0]
+
+    out = io.BytesIO()
+    canvas.save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+def _should_fallback_collage(status_code: int, body_text: str) -> bool:
+    if status_code not in {400, 413, 415, 422}:
+        return False
+    text = (body_text or "").lower()
+    if any(
+        marker in text
+        for marker in (
+            "insufficient_balance",
+            "insufficient account balance",
+            "unauthorized",
+            "invalid api key",
+            "forbidden",
+            "rate limit",
+            "quota",
+        )
+    ):
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "image",
+            "image[]",
+            "file",
+            "multipart",
+            "form",
+            "too many",
+            "unsupported",
+            "invalid",
+        )
+    )
+
+
+class OpenAICompatBackend:
+    """OpenAI-compatible Images API backend (generate/edit)."""
+
+    def __init__(
+        self,
+        *,
+        imgr,
+        base_url: str,
+        api_keys: list[str],
+        timeout: int = 120,
+        max_retries: int = 2,
+        default_model: str = "",
+        default_size: str = "4096x4096",
+        supports_edit: bool = True,
+        extra_body: dict | None = None,
+        proxy_url: str | None = None,
+        allowed_sizes: list[str] | None = None,
+        ratio_default_sizes: dict[str, str] | None = None,
+    ):
+        self.imgr = imgr
+        self.base_url = normalize_openai_compat_base_url(base_url)
+        self.api_keys = [str(k).strip() for k in (api_keys or []) if str(k).strip()]
+        self.timeout = int(timeout or 120)
+        self.max_retries = int(max_retries or 2)
+        self.default_model = str(default_model or "").strip()
+        self.default_size = normalize_size_text(
+            str(default_size or "4096x4096").strip()
+        )
+        self.supports_edit = bool(supports_edit)
+        self.extra_body = extra_body or {}
+        self.proxy_url = str(proxy_url or "").strip() or None
+        self.allowed_sizes = [
+            normalize_size_text(s)
+            for s in (allowed_sizes or [])
+            if normalize_size_text(s)
+        ]
+        self._ratio_defaults = (
+            ratio_defaults_from_sizes(self.allowed_sizes)
+            if self.allowed_sizes
+            else {}
+        )
+        if ratio_default_sizes and self.allowed_sizes:
+            for ratio, size in ratio_default_sizes.items():
+                r = str(ratio or "").strip()
+                s = normalize_size_text(size)
+                if r and s and s in self.allowed_sizes:
+                    self._ratio_defaults[r] = s
+
+        self._key_index = 0
+        self._clients: dict[str, AsyncOpenAI] = {}
+        self._http_client = None
+        self._raw_client: httpx.AsyncClient | None = None
+        self._images_generate_disabled_until = 0.0
+        self._images_edit_disabled_until = 0.0
+
+    @staticmethod
+    def _supports_http_client_param() -> bool:
+        try:
+            sig = inspect.signature(AsyncOpenAI)
+        except Exception:
+            try:
+                sig = inspect.signature(AsyncOpenAI.__init__)  # type: ignore[misc]
+            except Exception:
+                return False
+        return "http_client" in sig.parameters
+
+    def _get_http_client(self):
+        if not self.proxy_url:
+            return None
+        if self._http_client is not None:
+            return self._http_client
+        self._http_client = build_proxy_http_client(self.proxy_url)
+        return self._http_client
+
+    @staticmethod
+    def _image_support_cooldown_seconds() -> int:
+        # Some third-party gateways route different backends; a 404 may be transient.
+        # Use a cooldown instead of permanent disable to avoid "worked once then never again".
+        return 600
+
+    def _is_generate_temporarily_disabled(self) -> bool:
+        return time.time() < self._images_generate_disabled_until
+
+    def _is_edit_temporarily_disabled(self) -> bool:
+        return time.time() < self._images_edit_disabled_until
+
+    def _disable_generate_temporarily(self) -> None:
+        self._images_generate_disabled_until = (
+            time.time() + self._image_support_cooldown_seconds()
+        )
+
+    def _disable_edit_temporarily(self) -> None:
+        self._images_edit_disabled_until = (
+            time.time() + self._image_support_cooldown_seconds()
+        )
+
+    @staticmethod
+    def _try_get_image_size(path: Path) -> tuple[int, int] | None:
+        try:
+            from PIL import Image as PILImage
+        except Exception:
+            return None
+        try:
+            with PILImage.open(path) as im:
+                return im.size
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_invalid_size_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        if "size" not in msg:
+            return False
+        return any(
+            k in msg
+            for k in (
+                "invalid",
+                "unsupported",
+                "not supported",
+                "allowed",
+                "must be",
+                "not one of",
+            )
+        )
+
+    def _resolve_size(
+        self, size: str | None, resolution: str | None
+    ) -> tuple[str, str, bool]:
+        raw = normalize_size_text(size)
+        if not raw:
+            raw = normalize_size_text(resolution_to_size(resolution or ""))
+        if not raw:
+            raw = self.default_size
+
+        if not self.allowed_sizes:
+            return raw, raw, False
+
+        if raw in self.allowed_sizes:
+            return raw, raw, False
+
+        requested_ratio = size_to_ratio(raw)
+        fallback = ""
+        if requested_ratio:
+            default_ratio = size_to_ratio(self.default_size)
+            if (
+                self.default_size in self.allowed_sizes
+                and default_ratio == requested_ratio
+            ):
+                fallback = self.default_size
+            else:
+                fallback = self._ratio_defaults.get(requested_ratio, "")
+
+        if not fallback and self.default_size in self.allowed_sizes:
+            fallback = self.default_size
+
+        if not fallback and self.allowed_sizes:
+            fallback = self.allowed_sizes[0]
+
+        return fallback or raw, raw, True
+
+    async def close(self) -> None:
+        for client in self._clients.values():
+            try:
+                await client.close()
+            except Exception:
+                pass
+        self._clients.clear()
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                pass
+            self._http_client = None
+        if self._raw_client is not None:
+            try:
+                await self._raw_client.aclose()
+            except Exception:
+                pass
+            self._raw_client = None
+
+    def _next_key(self) -> str:
+        if not self.api_keys:
+            raise RuntimeError("未配置 API Key")
+        key = self.api_keys[self._key_index]
+        self._key_index = (self._key_index + 1) % len(self.api_keys)
+        return key
+
+    def _get_client(self, key: str) -> AsyncOpenAI:
+        client = self._clients.get(key)
+        if client is None:
+            kwargs: dict = {
+                "base_url": self.base_url,
+                "api_key": key,
+                "timeout": self.timeout,
+                "max_retries": self.max_retries,
+            }
+            if self.proxy_url and self._supports_http_client_param():
+                http_client = self._get_http_client()
+                if http_client is not None:
+                    kwargs["http_client"] = http_client
+            client = AsyncOpenAI(**kwargs)
+            self._clients[key] = client
+        return client
+
+    async def _recreate_client(self, key: str) -> AsyncOpenAI:
+        old = self._clients.pop(key, None)
+        if old is not None:
+            try:
+                await old.close()
+            except Exception:
+                pass
+        kwargs: dict = {
+            "base_url": self.base_url,
+            "api_key": key,
+            "timeout": self.timeout,
+            "max_retries": self.max_retries,
+        }
+        if self.proxy_url and self._supports_http_client_param():
+            http_client = self._get_http_client()
+            if http_client is not None:
+                kwargs["http_client"] = http_client
+        client = AsyncOpenAI(
+            **kwargs
+        )
+        self._clients[key] = client
+        return client
+
+    def _get_raw_http_client(self) -> httpx.AsyncClient:
+        if self._raw_client is not None and not self._raw_client.is_closed:
+            return self._raw_client
+        self._raw_client = None
+        kwargs: dict = {"timeout": float(self.timeout), "follow_redirects": True}
+        if self.proxy_url:
+            kwargs["proxy"] = self.proxy_url
+        self._raw_client = httpx.AsyncClient(
+            **kwargs,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
+                ),
+            },
+        )
+        return self._raw_client
+
+    @staticmethod
+    def _is_retryable_http_status(status: int) -> bool:
+        return status == 429 or status >= 500
+
+    async def _raw_post_json(
+        self, url: str, api_key: str, payload: dict
+    ) -> httpx.Response:
+        client = self._get_raw_http_client()
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        attempts = self.max_retries + 1
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                resp = await client.post(url, headers=headers, json=payload)
+                if (
+                    self._is_retryable_http_status(resp.status_code)
+                    and attempt + 1 < attempts
+                ):
+                    await asyncio.sleep(min(2.0, 0.4 * (2 ** attempt)))
+                    continue
+                return resp
+            except Exception as exc:
+                last_exc = exc
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(min(2.0, 0.4 * (2 ** attempt)))
+                    continue
+        raise RuntimeError(
+            f"请求失败（已重试 {self.max_retries} 次）: {last_exc}"
+        ) from last_exc
+
+    async def _raw_post_multipart(
+        self,
+        url: str,
+        api_key: str,
+        data: dict[str, str],
+        files: dict[str, tuple[str, bytes, str]] | list[tuple[str, tuple[str, bytes, str]]],
+    ) -> httpx.Response:
+        client = self._get_raw_http_client()
+        headers = {"Authorization": f"Bearer {api_key}"}
+        attempts = self.max_retries + 1
+        last_exc: Exception | None = None
+        logger.info(
+            "[OpenAICompat][multipart] POST %s, form_fields=%s, files=%s",
+            url,
+            list(data.keys()),
+            _multipart_file_summary(files),
+        )
+        for attempt in range(attempts):
+            try:
+                resp = await client.post(
+                    url, headers=headers, data=data, files=files
+                )
+                if (
+                    self._is_retryable_http_status(resp.status_code)
+                    and attempt + 1 < attempts
+                ):
+                    await asyncio.sleep(min(2.0, 0.4 * (2 ** attempt)))
+                    continue
+                return resp
+            except Exception as exc:
+                last_exc = exc
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(min(2.0, 0.4 * (2 ** attempt)))
+                    continue
+        raise RuntimeError(
+            f"请求失败（已重试 {self.max_retries} 次）: {last_exc}"
+        ) from last_exc
+
+    async def _save_httpx_response(
+        self, resp: httpx.Response, *, endpoint_url: str
+    ) -> Path:
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"HTTP {resp.status_code}: {(resp.text or '')[:300]}"
+            )
+
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if content_type.startswith("image/"):
+            return await self.imgr.save_image(resp.content)
+
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise RuntimeError(
+                f"返回内容不是有效 JSON: {(resp.text or '')[:200]}"
+            ) from exc
+
+        items = None
+        if isinstance(data, dict):
+            items = data.get("data")
+            if not items:
+                items = data.get("output")
+        if not items:
+            raise RuntimeError(f"未在响应中找到图片数据: {str(data)[:200]}")
+
+        if isinstance(items, list):
+            if not items:
+                raise RuntimeError("返回的 data 列表为空")
+            item = items[0]
+        else:
+            item = items
+
+        if isinstance(item, dict):
+            b64_json = item.get("b64_json")
+            url = item.get("url")
+        else:
+            b64_json = getattr(item, "b64_json", None)
+            url = getattr(item, "url", None)
+
+        if url:
+            return await self.imgr.download_image(str(url))
+        if b64_json:
+            return await self.imgr.save_base64_image(str(b64_json))
+        raise RuntimeError(f"返回数据不包含图片: {str(data)[:200]}")
+
+    async def _save_images_response(self, resp: ImagesResponse) -> Path:
+        resp = await _resolve_awaitable(resp)
+
+        if isinstance(resp, dict):
+            data = await _resolve_awaitable(resp.get("data"))
+        else:
+            data = await _resolve_awaitable(getattr(resp, "data", None))
+
+        if data is None:
+            try:
+                model_dump = getattr(resp, "model_dump", None)
+                dumped = await _resolve_awaitable(model_dump()) if callable(model_dump) else None
+            except Exception:
+                dumped = None
+            if isinstance(dumped, dict):
+                data = dumped.get("data")
+
+        if not data:
+            raise RuntimeError("未返回图片数据")
+
+        if isinstance(data, list):
+            items = data
+        else:
+            try:
+                items = list(data)
+            except TypeError:
+                items = [data]
+
+        img = await _resolve_awaitable(items[0])
+        if isinstance(img, dict):
+            url = await _resolve_awaitable(img.get("url"))
+            b64_json = await _resolve_awaitable(img.get("b64_json"))
+        else:
+            url = await _resolve_awaitable(getattr(img, "url", None))
+            b64_json = await _resolve_awaitable(getattr(img, "b64_json", None))
+
+        if url:
+            return await self.imgr.download_image(str(url))
+        if b64_json:
+            return await self.imgr.save_base64_image(str(b64_json))
+        raise RuntimeError("返回数据不包含图片")
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        size: str | None = None,
+        resolution: str | None = None,
+        extra_body: dict | None = None,
+    ) -> Path:
+        key = self._next_key()
+
+        final_model = str(model or self.default_model or "").strip()
+        if not final_model:
+            raise RuntimeError("未配置 model")
+
+        final_size, raw_size, fallback_used = self._resolve_size(size, resolution)
+        if fallback_used:
+            logger.warning(
+                "[OpenAICompat][generate] 不支持的 size='%s'，已兜底为 '%s'",
+                raw_size,
+                final_size,
+            )
+
+        payload: dict = {
+            "model": final_model,
+            "prompt": prompt,
+            "size": final_size,
+            "response_format": "b64_json",
+        }
+        eb = {}
+        eb.update(self.extra_body)
+        eb.update(extra_body or {})
+        if eb:
+            payload.update(eb)
+
+        url = f"{self.base_url}/images/generations"
+        t0 = time.time()
+        try:
+            if self._is_generate_temporarily_disabled():
+                raise RuntimeError(
+                    "该后端 images.generate 暂时不可用（此前返回 404，已进入冷却期）"
+                )
+            resp = await self._raw_post_json(url, key, payload)
+            if resp.status_code == 404:
+                self._disable_generate_temporarily()
+                logger.error(
+                    "[OpenAICompat][generate] 404 通常表示 base_url 填错或该服务不支持 Images API；"
+                    "请确认 base_url 指向包含 /v1/images 的 OpenAI 兼容入口。"
+                )
+            body_text = (resp.text or "")[:500]
+            if resp.status_code >= 400:
+                if (
+                    final_size == "4096x4096"
+                    and self._is_invalid_size_error(Exception(body_text))
+                ):
+                    logger.warning(
+                        "[OpenAICompat][generate] 4096x4096 可能不受该后端支持，尝试降级到 2048x2048: %s",
+                        body_text,
+                    )
+                    payload["size"] = "2048x2048"
+                    resp = await self._raw_post_json(url, key, payload)
+                    body_text = (resp.text or "")[:500]
+                if resp.status_code >= 400:
+                    raise RuntimeError(
+                        f"HTTP {resp.status_code}: {body_text}"
+                    )
+        except Exception as e:
+            logger.error(
+                f"[OpenAICompat][generate] API 调用失败，base_url={self.base_url}，耗时: {time.time() - t0:.2f}s: {e}"
+            )
+            raise
+
+        logger.info(f"[OpenAICompat][generate] API 响应耗时: {time.time() - t0:.2f}s")
+        out_path = await self._save_httpx_response(resp, endpoint_url=url)
+        self._images_generate_disabled_until = 0.0
+        if _looks_like_size(final_size):
+            got = self._try_get_image_size(out_path)
+            if got is not None and f"{got[0]}x{got[1]}" != final_size:
+                logger.warning(
+                    "[OpenAICompat][generate] 输出尺寸与请求不一致: requested=%s got=%sx%s (服务商可能忽略 size)",
+                    final_size,
+                    got[0],
+                    got[1],
+                )
+        return out_path
+
+    async def edit(
+        self,
+        prompt: str,
+        images: list[bytes],
+        *,
+        model: str | None = None,
+        size: str | None = None,
+        resolution: str | None = None,
+        extra_body: dict | None = None,
+    ) -> Path:
+        if not self.supports_edit:
+            raise RuntimeError("该后端不支持改图/图生图")
+
+        if not images:
+            raise ValueError("至少需要一张图片")
+
+        key = self._next_key()
+
+        final_model = str(model or self.default_model or "").strip()
+        if not final_model:
+            raise RuntimeError("未配置 model")
+
+        final_size, raw_size, fallback_used = self._resolve_size(size, resolution)
+        if fallback_used:
+            logger.warning(
+                "[OpenAICompat][edit] 不支持的 size='%s'，已兜底为 '%s'",
+                raw_size,
+                final_size,
+            )
+
+        form_data: dict = {
+            "model": final_model,
+            "prompt": prompt,
+            "size": final_size,
+            "response_format": "b64_json",
+        }
+        eb = {}
+        eb.update(self.extra_body)
+        eb.update(extra_body or {})
+        if eb:
+            form_data.update(eb)
+
+        url = f"{self.base_url}/images/edits"
+
+        aiwork_format = is_aiwork_base_url(self.base_url)
+        if aiwork_format:
+            str_data = build_aiwork_edit_form_fields(
+                model=final_model,
+                prompt=prompt,
+                size=final_size,
+                extra_body=eb,
+            )
+        else:
+            str_data = {k: str(v) for k, v in form_data.items()}
+        files = build_aiwork_edit_file_fields(images)
+        logger.info(
+            "[OpenAICompat][edit] 多参考图独立上传: images=%s field=image[] aiwork=%s",
+            len(files),
+            aiwork_format,
+        )
+
+        t0 = time.time()
+        try:
+            if self._is_edit_temporarily_disabled():
+                raise RuntimeError(
+                    "该后端 images.edit 暂时不可用（此前返回 404，已进入冷却期）"
+                )
+            resp = await self._raw_post_multipart(url, key, str_data, files)
+            body_text = (resp.text or "")[:500]
+            if len(images) > 1 and _should_fallback_collage(resp.status_code, body_text):
+                logger.warning(
+                    "[OpenAICompat][edit] 多文件上传失败，退回旧拼图单图模式: HTTP %s: %s",
+                    resp.status_code,
+                    body_text,
+                )
+                packed = _build_collage(images)
+                mime, ext = guess_image_mime_and_ext(packed)
+                files = {"image[]": (f"input.{ext}", packed, mime)}
+                resp = await self._raw_post_multipart(url, key, str_data, files)
+                body_text = (resp.text or "")[:500]
+            if resp.status_code == 404:
+                self._disable_edit_temporarily()
+                logger.error(
+                    "[OpenAICompat][edit] 404 通常表示 base_url 填错或该服务不支持 images.edit；"
+                    "请确认 base_url 指向包含 /v1/images 的 OpenAI 兼容入口，并且该服务支持改图。"
+                )
+            body_text = (resp.text or "")[:500]
+            if resp.status_code >= 400:
+                if (
+                    final_size == "4096x4096"
+                    and self._is_invalid_size_error(Exception(body_text))
+                ):
+                    logger.warning(
+                        "[OpenAICompat][edit] 4096x4096 可能不受该后端支持，尝试降级到 2048x2048: %s",
+                        body_text,
+                    )
+                    str_data["size"] = "2048x2048"
+                    resp = await self._raw_post_multipart(url, key, str_data, files)
+                    body_text = (resp.text or "")[:500]
+                if resp.status_code >= 400:
+                    raise RuntimeError(
+                        f"HTTP {resp.status_code}: {body_text}"
+                    )
+        except Exception as e:
+            logger.error(
+                f"[OpenAICompat][edit] API 调用失败，base_url={self.base_url}，耗时: {time.time() - t0:.2f}s: {e}"
+            )
+            raise
+
+        logger.info(f"[OpenAICompat][edit] API 响应耗时: {time.time() - t0:.2f}s")
+        out_path = await self._save_httpx_response(resp, endpoint_url=url)
+        self._images_edit_disabled_until = 0.0
+        if _looks_like_size(final_size):
+            got = self._try_get_image_size(out_path)
+            if got is not None and f"{got[0]}x{got[1]}" != final_size:
+                logger.warning(
+                    "[OpenAICompat][edit] 输出尺寸与请求不一致: requested=%s got=%sx%s (服务商可能忽略 size)",
+                    final_size,
+                    got[0],
+                    got[1],
+                )
+        return out_path
