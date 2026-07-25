@@ -1,10 +1,10 @@
+import ast
 import importlib.util
 import sys
 import types
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_NAME = "main_init_request_mode_testpkg"
@@ -160,9 +160,7 @@ def _load_module():
     sys.modules[CORE_PACKAGE_NAME] = core_pkg
 
     mcp_mod = types.ModuleType("mcp")
-    mcp_mod.types = types.SimpleNamespace(
-        CallToolResult=type("CallToolResult", (), {})
-    )
+    mcp_mod.types = types.SimpleNamespace(CallToolResult=type("CallToolResult", (), {}))
     sys.modules["mcp"] = mcp_mod
 
     astrbot_mod = types.ModuleType("astrbot")
@@ -559,6 +557,73 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(yielded, [])
         self.assertTrue(event.call_llm)
         self.assertTrue(event.stopped)
+
+    def test_llm_registers_only_one_image_tool(self):
+        tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+        registered_tools: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                func = decorator.func
+                if not (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "filter"
+                    and func.attr == "llm_tool"
+                ):
+                    continue
+                registered_tools.append(node.name)
+
+        image_tools = [
+            name
+            for name in registered_tools
+            if name
+            in {
+                "gitee_draw_image",
+                "gitee_edit_image",
+                "aiimg_generate",
+                "aiimg_batch_generate",
+            }
+        ]
+        self.assertEqual(image_tools, ["aiimg_generate"])
+
+    def test_selfie_prompt_describes_fixed_and_user_reference_ranges(self):
+        mod, _ = _load_module()
+        plugin = mod.GiteeAIImagePlugin(
+            context=types.SimpleNamespace(),
+            config={"features": {"selfie": {"prompt_prefix": "固定图逐张规则"}}},
+        )
+
+        prompt = plugin._build_selfie_prompt(
+            "参考衣服和姿势",
+            reference_count=4,
+            extra_reference_count=2,
+        )
+
+        self.assertIn("固定图逐张规则", prompt)
+        self.assertIn("第 1-4 张是固定人物参考图", prompt)
+        self.assertIn("第 5-6 张是本次用户附带或引用的参考图", prompt)
+        self.assertIn("用户参考图不是待修改原图", prompt)
+        self.assertIn("用户要求：参考衣服和姿势", prompt)
+
+    def test_selfie_prompt_without_user_reference_keeps_fixed_range(self):
+        mod, _ = _load_module()
+        plugin = mod.GiteeAIImagePlugin(
+            context=types.SimpleNamespace(),
+            config={"features": {"selfie": {"prompt_prefix": "固定图规则"}}},
+        )
+
+        prompt = plugin._build_selfie_prompt(
+            "夜间自拍",
+            reference_count=4,
+            extra_reference_count=0,
+        )
+
+        self.assertIn("第 1-4 张均为固定人物参考图", prompt)
+        self.assertNotIn("本次用户附带或引用", prompt)
 
 
 if __name__ == "__main__":

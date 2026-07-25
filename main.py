@@ -18,6 +18,7 @@ import json
 import math
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,13 @@ from .core.debouncer import Debouncer
 from .core.draw_service import ImageDrawService
 from .core.edit_router import EditRouter
 from .core.emoji_feedback import mark_failed, mark_processing, mark_success
+from .core.gitee_sizes import (
+    GITEE_SUPPORTED_RATIOS,
+    normalize_size_text,
+    resolve_ratio_size,
+)
+from .core.image_format import decode_base64_image_payload, guess_image_mime_and_ext
+from .core.image_manager import ImageManager
 from .core.image_task_parser import (
     ImageTaskSpec,
     ParsedImageRequest,
@@ -54,19 +62,11 @@ from .core.llm_batch_planner import (
     parse_planned_prompt_items,
     validate_planned_prompt_items,
 )
-from .core.gitee_sizes import (
-    GITEE_SUPPORTED_RATIOS,
-    normalize_size_text,
-    resolve_ratio_size,
-)
-from .core.image_format import decode_base64_image_payload, guess_image_mime_and_ext
-from .core.image_manager import ImageManager
 from .core.nanobanana import NanoBananaService
 from .core.provider_registry import ProviderRegistry
 from .core.ref_store import ReferenceStore
 from .core.utils import close_session, collect_at_user_ids, get_images_from_event
 from .core.video_manager import VideoManager
-
 
 _BATCH_COMMAND_PATTERN = re.compile(r"[/!！.。．]批量(?:\s*\d+|\d+)")
 _async_pause = asyncio.sleep
@@ -89,6 +89,15 @@ class ExecutedImageTask:
     spec: ImageTaskSpec
     image_path: Path
     task_meta: dict[str, Any]
+
+
+def _resolve_busy_schedule_media_recorder(event, context):
+    """Resolve the recorder from the tool event, then the shared plugin context."""
+    callback = getattr(event, "_busy_schedule_record_media_success", None)
+    if callable(callback):
+        return callback
+    callback = getattr(context, "_busy_schedule_record_media_success", None)
+    return callback if callable(callback) else None
 
 
 class GiteeAIImagePlugin(Star):
@@ -240,7 +249,9 @@ class GiteeAIImagePlugin(Star):
         normalized = {
             "mode": mode,
             "user_prompt": str(meta.get("user_prompt") or "").strip(),
-            "effective_user_prompt": str(meta.get("effective_user_prompt") or "").strip(),
+            "effective_user_prompt": str(
+                meta.get("effective_user_prompt") or ""
+            ).strip(),
             "effective_prompt": str(meta.get("effective_prompt") or "").strip(),
             "reference_source": str(meta.get("reference_source") or "").strip(),
             "reference_count": reference_count,
@@ -397,13 +408,16 @@ class GiteeAIImagePlugin(Star):
             "mode": str(mode or "").strip(),
             "user_prompt": str(user_prompt or "").strip(),
             "effective_user_prompt": str(
-                effective_user_prompt if effective_user_prompt is not None else user_prompt
+                effective_user_prompt
+                if effective_user_prompt is not None
+                else user_prompt
             ).strip(),
             "effective_prompt": str(effective_prompt or "").strip(),
             "reference_source": str(reference_source or "").strip(),
             "reference_count": max(0, int(reference_count or 0)),
             "extra_reference_count": max(0, int(extra_reference_count or 0)),
-            "continue_with": str(continue_with or mode or "").strip() or str(mode or "").strip(),
+            "continue_with": str(continue_with or mode or "").strip()
+            or str(mode or "").strip(),
             "follow_up": bool(follow_up),
             "backend": str(backend or "").strip(),
             "created_at": time.time(),
@@ -416,7 +430,8 @@ class GiteeAIImagePlugin(Star):
         summary = {
             "status": "completed",
             "mode": mode,
-            "continue_with": str(task_meta.get("continue_with") or mode).strip() or mode,
+            "continue_with": str(task_meta.get("continue_with") or mode).strip()
+            or mode,
             "user_prompt": self._truncate_text(task_meta.get("user_prompt"), limit=180),
             "effective_prompt": self._truncate_text(
                 task_meta.get("effective_prompt"), limit=260
@@ -494,7 +509,9 @@ class GiteeAIImagePlugin(Star):
         else:
             try:
                 parsed_history = json.loads(history_raw or "[]")
-                history = list(parsed_history) if isinstance(parsed_history, list) else []
+                history = (
+                    list(parsed_history) if isinstance(parsed_history, list) else []
+                )
             except Exception as exc:
                 logger.warning(
                     "[GiteeAIImagePlugin] failed to parse conversation history for plugin note: %s",
@@ -502,7 +519,9 @@ class GiteeAIImagePlugin(Star):
                 )
                 history = []
 
-        history.append({"role": "user", "content": "Output your last task result below."})
+        history.append(
+            {"role": "user", "content": "Output your last task result below."}
+        )
         history.append({"role": "assistant", "content": note})
 
         try:
@@ -597,7 +616,9 @@ class GiteeAIImagePlugin(Star):
         try:
             from astrbot.core.agent import tool_image_cache as cache_module
         except Exception as exc:
-            logger.debug("[GiteeAIImagePlugin] skip tool image cache runtime patch: %s", exc)
+            logger.debug(
+                "[GiteeAIImagePlugin] skip tool image cache runtime patch: %s", exc
+            )
             return
 
         cache_cls = getattr(cache_module, "ToolImageCache", None)
@@ -636,7 +657,8 @@ class GiteeAIImagePlugin(Star):
 
             cache_self._cache_dir = str(cache_dir)
             logger.debug(
-                "[GiteeAIImagePlugin] tool image cache runtime patch wrote: %s", file_path
+                "[GiteeAIImagePlugin] tool image cache runtime patch wrote: %s",
+                file_path,
             )
             return cached_image_cls(
                 tool_call_id=tool_call_id,
@@ -861,7 +883,9 @@ class GiteeAIImagePlugin(Star):
             return p
 
         max_side = self._as_int(conf.get("weixin_image_max_side", 4096), default=4096)
-        max_kb = self._as_int(conf.get("weixin_image_max_size_kb", 10240), default=10240)
+        max_kb = self._as_int(
+            conf.get("weixin_image_max_size_kb", 10240), default=10240
+        )
         max_side = max(1600, min(max_side, 8192))
         target_bytes = max(512, max_kb) * 1024
 
@@ -937,7 +961,9 @@ class GiteeAIImagePlugin(Star):
     ) -> Path:
         if self._is_weixin_event(event):
             self._apply_weixin_timeout(getattr(event, "platform", None))
-            return await asyncio.to_thread(self._compress_image_for_weixin_sync, image_path)
+            return await asyncio.to_thread(
+                self._compress_image_for_weixin_sync, image_path
+            )
         return Path(image_path)
 
     @staticmethod
@@ -995,6 +1021,27 @@ class GiteeAIImagePlugin(Star):
     def _selfie_disabled_message() -> str:
         return "自拍参考图模式已关闭（features.selfie.enabled=false）"
 
+    def _get_busy_schedule_media_recorder(self, event: AstrMessageEvent):
+        return _resolve_busy_schedule_media_recorder(event, self.context)
+
+    async def _record_busy_schedule_media_success(
+        self, event: AstrMessageEvent, media_type: str, operation_id: str
+    ) -> None:
+        callback = self._get_busy_schedule_media_recorder(event)
+        if not callable(callback):
+            logger.debug("[aiimg_generate] BusySchedule media recorder is unavailable")
+            return
+        try:
+            result = callback(
+                event.unified_msg_origin,
+                {media_type},
+                operation_id=operation_id,
+            )
+            if hasattr(result, "__await__"):
+                await result
+        except Exception as exc:
+            logger.warning("[aiimg_generate] failed to record media send: %s", exc)
+
     async def _send_image_with_fallback(
         self, event: AstrMessageEvent, image_path: Path, *, max_attempts: int = 5
     ) -> SendImageResult:
@@ -1003,12 +1050,17 @@ class GiteeAIImagePlugin(Star):
         Avoids wasting generation credits when platform send fails transiently.
         """
         original_path = Path(image_path)
+        operation_id = f"image:{event.unified_msg_origin}:{uuid.uuid4().hex}"
         p = await self._prepare_image_for_send(event, original_path)
         should_cleanup_temp = self._is_weixin_send_temp_path(p) and (
             p.resolve(strict=False) != original_path.resolve(strict=False)
         )
 
         async def finish(result: SendImageResult) -> SendImageResult:
+            if result.ok:
+                await self._record_busy_schedule_media_success(
+                    event, "image", operation_id
+                )
             if should_cleanup_temp:
                 await asyncio.to_thread(self._remove_weixin_send_temp_image_sync, p)
                 if result.cached_path == p:
@@ -1146,9 +1198,7 @@ class GiteeAIImagePlugin(Star):
                             attempts,
                         )
                         return await finish(
-                            SendImageResult(
-                                ok=True, cached_path=p, used_fallback=True
-                            )
+                            SendImageResult(ok=True, cached_path=p, used_fallback=True)
                         )
                     except Exception as e:
                         compact_exc = e
@@ -1483,7 +1533,11 @@ class GiteeAIImagePlugin(Star):
         if not resolved_size and aspect_ratio:
             resolved_size = self._resolve_ratio_size(str(aspect_ratio).strip())
         if event is None:
-            return {"success": False, "message": "no event context for selfie ref lookup", "images": []}
+            return {
+                "success": False,
+                "message": "no event context for selfie ref lookup",
+                "images": [],
+            }
         try:
             path, _ = await self._generate_selfie_image_with_meta(
                 event, image_prompt, None, size=resolved_size or None
@@ -2170,41 +2224,6 @@ class GiteeAIImagePlugin(Star):
 
     # ==================== LLM 工具 ====================
 
-    @filter.llm_tool(name="gitee_draw_image")
-    async def gitee_draw_image(self, event: AstrMessageEvent, prompt: str):
-        """（兼容旧版本）根据提示词生成图片。
-
-        Args:
-            prompt(string): 图片提示词，需要包含主体、场景、风格等描述
-        """
-        return await self.aiimg_generate(
-            event, prompt=prompt, mode="text", backend="auto"
-        )
-
-    @filter.llm_tool(name="gitee_edit_image")
-    async def gitee_edit_image(
-        self,
-        event: AstrMessageEvent,
-        prompt: str,
-        use_message_images: bool = True,
-        backend: str = "auto",
-    ):
-        """（兼容旧版本）编辑用户发送的图片或引用的图片。
-
-        Args:
-            prompt(string): 图片编辑提示词
-            use_message_images(boolean): 是否自动获取用户消息中的图片（目前仅支持 true）
-            backend(string): auto=自动选择；也可填 provider_id（你在 WebUI providers 里配置的 id）
-        """
-        if not use_message_images:
-            await self._signal_llm_tool_failure(event)
-            return self._llm_tool_text_result(
-                "This image editing request is invalid because message images were disabled. Use the images already attached to the current message."
-            )
-        return await self.aiimg_generate(
-            event, prompt=prompt, mode="edit", backend=backend
-        )
-
     @filter.llm_tool(name="aiimg_generate")
     async def aiimg_generate(
         self,
@@ -2214,23 +2233,18 @@ class GiteeAIImagePlugin(Star):
         backend: str = "auto",
         output: str = "",
     ):
-        """统一图片生成/改图/生活照（参考照）工具。
+        """生成图片、修改图片，或基于固定人物参考照生成新照片。
 
-        使用建议（给 LLM 的决策规则）：
-        - 用户发送/引用了图片，并要求"改图/换背景/换风格/修图/换衣服"等：用 mode=edit（或 mode=auto）
-        - 用户要求"看看你/来一张你自己的生活照"，且已设置自拍参考照：用 mode=selfie_ref（或 mode=auto）
-        - 纯文生图（用户没有给图片）：用 mode=text（或 mode=auto）
+        模式选择：
+        - selfie_ref：结果需要表现你或固定人物本人，例如自拍、生活照、穿搭照；用户附带或引用的图片可作为服装、姿势、构图或场景参考。
+        - edit：直接修改用户发送或引用的原图，例如换背景、删除元素、修图或改变原图风格。
+        - text：生成与固定人物无关的新图片，例如风景、人群、食物、物品或插画。
 
-        当前 LLM tool 行为：
-        - 成功后优先直接把图片发送给用户
-        - tool result 返回文本摘要，写明本次任务的 mode、effective_prompt 和 follow-up 提示
-        - 不再把 ImageContent 回传给 LLM 上下文，避免额外多模态识图耗时
+        重要：带图片不等于 edit。修改这张原图用 edit；参考这张图重新拍一张你本人的照片用 selfie_ref。
 
         Args:
-            prompt(string): 提示词
-            mode(string): auto=自动判断, text=文生图, edit=改图, selfie_ref=参考照
-            backend(string): auto=自动选择；也可填 provider_id（你在 WebUI providers 里配置的 id）
-            output(string): 输出尺寸/分辨率。例: 2048x2048 或 4K（不同后端支持能力不同，留空用默认）
+            prompt(string): 完整的生成或修改要求。使用用户图片作参考时，说明要参考服装、姿势、构图或场景中的哪些内容。
+            mode(string): text=普通文生图，edit=直接修改原图，selfie_ref=固定人物参考图。
         """
         prompt = (prompt or "").strip()
         m = (mode or "auto").strip().lower()
@@ -2324,7 +2338,10 @@ class GiteeAIImagePlugin(Star):
                 else:
                     try:
                         logger.info("[aiimg_generate] route=auto->selfie_ref")
-                        image_path, task_meta = await self._generate_selfie_image_with_meta(
+                        (
+                            image_path,
+                            task_meta,
+                        ) = await self._generate_selfie_image_with_meta(
                             event,
                             prompt,
                             target_backend,
@@ -2342,11 +2359,18 @@ class GiteeAIImagePlugin(Star):
                         )
 
             if m == "auto":
-                follow_up_selfie_meta = await self._match_selfie_follow_up(event, prompt)
+                follow_up_selfie_meta = await self._match_selfie_follow_up(
+                    event, prompt
+                )
                 if follow_up_selfie_meta is not None:
                     try:
-                        logger.info("[aiimg_generate] route=auto->selfie_ref (follow-up)")
-                        image_path, task_meta = await self._generate_selfie_image_with_meta(
+                        logger.info(
+                            "[aiimg_generate] route=auto->selfie_ref (follow-up)"
+                        )
+                        (
+                            image_path,
+                            task_meta,
+                        ) = await self._generate_selfie_image_with_meta(
                             event,
                             prompt,
                             target_backend,
@@ -2441,7 +2465,9 @@ class GiteeAIImagePlugin(Star):
             logger.info("[aiimg_generate] route=draw")
             draw_conf = self._get_feature("draw")
             original_prompt = prompt
-            draw_prefix = self._expand_time_placeholders(str(draw_conf.get("prompt_prefix") or "").strip())
+            draw_prefix = self._expand_time_placeholders(
+                str(draw_conf.get("prompt_prefix") or "").strip()
+            )
             if draw_prefix:
                 prompt = f"{draw_prefix}\n\n{prompt}"
             image_path = await self.draw.generate(
@@ -2475,7 +2501,6 @@ class GiteeAIImagePlugin(Star):
         finally:
             await self._end_user_job(user_id, kind="image")
 
-    @filter.llm_tool(name="aiimg_batch_generate")
     async def aiimg_batch_generate(
         self,
         event: AstrMessageEvent,
@@ -2501,7 +2526,9 @@ class GiteeAIImagePlugin(Star):
         prompt = str(prompt or "").strip()
         if not prompt:
             await self._signal_llm_tool_failure(event)
-            return self._llm_tool_text_result("Batch image planning failed because no prompt was provided.")
+            return self._llm_tool_text_result(
+                "Batch image planning failed because no prompt was provided."
+            )
 
         target_count = self._as_int(count, default=4)
         target_count = max(1, min(self._get_batch_max_count(), target_count))
@@ -2541,7 +2568,11 @@ class GiteeAIImagePlugin(Star):
             getattr(getattr(event, "message_obj", None), "message_id", "") or ""
         )
         origin = getattr(event, "unified_msg_origin", "") or ""
-        if message_id and origin and self.debouncer.llm_tool_is_duplicate(message_id, origin):
+        if (
+            message_id
+            and origin
+            and self.debouncer.llm_tool_is_duplicate(message_id, origin)
+        ):
             await mark_success(event)
             return self._llm_tool_text_result(
                 "This batch image request was already handled for the same message. Do not run it again."
@@ -2591,7 +2622,9 @@ class GiteeAIImagePlugin(Star):
                 results,
                 title=f"LLM 批量{self._batch_mode_label(specs[0])} x{len(specs)}",
             )
-            success_count = sum(1 for result in results if result.success and result.value)
+            success_count = sum(
+                1 for result in results if result.success and result.value
+            )
             failed_count = len(results) - success_count
             if success_count > 0:
                 await self._remember_batch_success(event, results)
@@ -2875,7 +2908,9 @@ class GiteeAIImagePlugin(Star):
         resolution: str | None = None,
     ) -> ExecutedImageTask:
         if spec.mode == "draw":
-            prompt = self._expand_time_placeholders(str(spec.effective_prompt or spec.user_prompt or "").strip())
+            prompt = self._expand_time_placeholders(
+                str(spec.effective_prompt or spec.user_prompt or "").strip()
+            )
             if not prompt:
                 raise RuntimeError("文生图提示词为空。")
             image_path = await self.draw.generate(
@@ -2892,7 +2927,9 @@ class GiteeAIImagePlugin(Star):
                 continue_with="text",
                 backend=spec.provider_id,
             )
-            return ExecutedImageTask(spec=spec, image_path=image_path, task_meta=task_meta)
+            return ExecutedImageTask(
+                spec=spec, image_path=image_path, task_meta=task_meta
+            )
 
         if spec.mode == "edit":
             bytes_images = prepared_edit_images
@@ -2916,7 +2953,9 @@ class GiteeAIImagePlugin(Star):
             )
             if spec.preset_name:
                 task_meta["preset_name"] = spec.preset_name
-            return ExecutedImageTask(spec=spec, image_path=image_path, task_meta=task_meta)
+            return ExecutedImageTask(
+                spec=spec, image_path=image_path, task_meta=task_meta
+            )
 
         if spec.mode == "selfie_ref":
             if not self._is_selfie_enabled():
@@ -2928,7 +2967,9 @@ class GiteeAIImagePlugin(Star):
                 size=size,
                 resolution=resolution,
             )
-            return ExecutedImageTask(spec=spec, image_path=image_path, task_meta=task_meta)
+            return ExecutedImageTask(
+                spec=spec, image_path=image_path, task_meta=task_meta
+            )
 
         raise RuntimeError(f"不支持的图片任务模式: {spec.mode}")
 
@@ -3636,34 +3677,62 @@ class GiteeAIImagePlugin(Star):
     def _expand_time_placeholders(text: str) -> str:
         """Replace {now}/{date}/{time}/{weekday} with current values."""
         from datetime import datetime as _dt
-        _weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+        _weekday_names = [
+            "星期一",
+            "星期二",
+            "星期三",
+            "星期四",
+            "星期五",
+            "星期六",
+            "星期日",
+        ]
         now = _dt.now()
         return (
-            text
-            .replace("{now}", now.strftime("%Y-%m-%d %H:%M"))
+            text.replace("{now}", now.strftime("%Y-%m-%d %H:%M"))
             .replace("{date}", now.strftime("%Y-%m-%d"))
             .replace("{time}", now.strftime("%H:%M"))
             .replace("{weekday}", _weekday_names[now.weekday()])
         )
 
-    def _build_selfie_prompt(self, prompt: str, extra_refs: int) -> str:
+    def _build_selfie_prompt(
+        self,
+        prompt: str,
+        *,
+        reference_count: int,
+        extra_reference_count: int,
+    ) -> str:
         conf = self._get_selfie_conf()
         prefix = str(conf.get("prompt_prefix", "") or "").strip()
         if not prefix:
             prefix = (
                 "请根据参考图生成一张新的自拍照：\n"
-                "1) 以第1张参考图的人脸身份为准（仅人脸身份特征），保持五官/气质一致。\n"
-                "2) 如果还有其它参考图，请将它们仅作为服装/姿势/构图/场景的参考。\n"
+                "1) 以固定人物参考图的人脸身份为准，保持五官和气质一致。\n"
+                "2) 本次用户参考图仅用于用户指定的服装、姿势、构图或场景。\n"
                 "3) 输出一张高质量照片风格自拍，不要拼图，不要水印。"
             )
 
         prefix = self._expand_time_placeholders(prefix)
-        user_prompt = self._expand_time_placeholders((prompt or "").strip() or "日常自拍照")
-        if extra_refs > 0:
-            return (
-                f"{prefix}\n\n用户要求：{user_prompt}\n（额外参考图数量：{extra_refs}）"
+        user_prompt = self._expand_time_placeholders(
+            (prompt or "").strip() or "日常自拍照"
+        )
+        reference_count = max(0, int(reference_count or 0))
+        extra_reference_count = max(0, int(extra_reference_count or 0))
+        if extra_reference_count > 0:
+            extra_start = reference_count + 1
+            extra_end = reference_count + extra_reference_count
+            if extra_start == extra_end:
+                extra_range = f"第 {extra_start} 张"
+            else:
+                extra_range = f"第 {extra_start}-{extra_end} 张"
+            reference_note = (
+                f"图片顺序：第 1-{reference_count} 张是固定人物参考图；"
+                f"{extra_range}是本次用户附带或引用的参考图。"
+                "用户参考图不是待修改原图，只参考用户要求中明确指定的服装、姿势、构图或场景。"
             )
-        return f"{prefix}\n\n用户要求：{user_prompt}"
+        else:
+            reference_note = f"图片顺序：第 1-{reference_count} 张均为固定人物参考图。"
+        return f"{prefix}\n\n{reference_note}\n\n用户要求：{user_prompt}"
 
     def _merge_selfie_chain_with_edit_chain(
         self, selfie_chain: list[object]
@@ -3724,7 +3793,9 @@ class GiteeAIImagePlugin(Star):
             prompt, follow_up_meta
         )
         final_prompt = self._build_selfie_prompt(
-            effective_user_prompt, extra_refs=len(extra_bytes)
+            effective_user_prompt,
+            reference_count=len(ref_images),
+            extra_reference_count=len(extra_bytes),
         )
 
         chain_override: list[dict] | None = None

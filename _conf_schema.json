@@ -16,7 +16,7 @@
           "llm_tool_enabled": {
             "type": "bool",
             "description": "允许 LLM 调用文生图",
-            "hint": "关闭后，即使 LLM 调用 aiimg_generate(mode=text) 也会被拒绝。",
+            "hint": "关闭后，统一图片工具不再允许普通文生图。",
             "default": true
           },
           "default_output": {
@@ -107,7 +107,7 @@
           "llm_tool_enabled": {
             "type": "bool",
             "description": "允许 LLM 调用改图",
-            "hint": "关闭后，即使 LLM 调用 aiimg_generate(mode=edit) 也会被拒绝。",
+            "hint": "关闭后，统一图片工具不再允许直接修改用户原图。",
             "default": true
           },
           "default_output": {
@@ -176,7 +176,7 @@
           "llm_tool_enabled": {
             "type": "bool",
             "description": "允许 LLM 调用自拍参考照",
-            "hint": "关闭后，即使 LLM 调用 aiimg_generate(mode=selfie_ref) 也会被拒绝。",
+            "hint": "关闭后，统一图片工具不再允许生成固定人物本人的照片。",
             "default": true
           },
           "reference_images": {
