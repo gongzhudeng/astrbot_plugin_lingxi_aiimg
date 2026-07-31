@@ -157,7 +157,9 @@ def _extract_ref_from_text(text: str) -> str | None:
     if s.startswith(("http://", "https://", "/")):
         return s
 
-    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+    if (s.startswith("{") and s.endswith("}")) or (
+        s.startswith("[") and s.endswith("]")
+    ):
         try:
             parsed = json.loads(s)
         except Exception:
@@ -207,7 +209,14 @@ def _extract_image_ref(data: Any) -> str | None:
             if ref:
                 return ref
 
-        for key in ("images", "image_urls", "attachments", "media", "result", "response"):
+        for key in (
+            "images",
+            "image_urls",
+            "attachments",
+            "media",
+            "result",
+            "response",
+        ):
             ref = _extract_image_ref(data.get(key))
             if ref:
                 return ref
@@ -327,6 +336,7 @@ class Grok2ApiImagesBackend:
         payload = self._merge_extra(payload)
         if isinstance(extra_body, dict) and extra_body:
             payload.update(extra_body)
+        payload["n"] = 1
 
         t0 = time.perf_counter()
         async with httpx.AsyncClient(
@@ -403,10 +413,8 @@ class Grok2ApiImagesBackend:
             base_payload = self._merge_extra(base_payload)
             if isinstance(extra_body, dict) and extra_body:
                 base_payload.update(extra_body)
+            base_payload["n"] = 1
 
-            last_resp: httpx.Response | None = None
-
-            # Prefer multipart first: /v1/images/edits (newer Grok2API) only supports multipart.
             resp: httpx.Response | None = None
 
             data_fields: dict[str, str] = {
@@ -424,6 +432,7 @@ class Grok2ApiImagesBackend:
             if isinstance(extra_body, dict) and extra_body:
                 for k, v in extra_body.items():
                     data_fields[str(k)] = self._coerce_form_value(v)
+            data_fields["n"] = "1"
 
             headers = {"Authorization": f"Bearer {self.api_key}"}
             for field_name in ("image", "images"):
@@ -436,7 +445,6 @@ class Grok2ApiImagesBackend:
                     resp = await client.post(
                         endpoint, headers=headers, data=data_fields, files=files
                     )
-                    last_resp = resp
                     if resp.status_code == 200:
                         break
                 if resp is not None and resp.status_code == 200:
@@ -458,6 +466,7 @@ class Grok2ApiImagesBackend:
                 base_payload = self._merge_extra(base_payload)
                 if isinstance(extra_body, dict) and extra_body:
                     base_payload.update(extra_body)
+                base_payload["n"] = 1
 
                 # 1) JSON variants (try generations only)
                 if self._endpoint_generate:
@@ -472,7 +481,6 @@ class Grok2ApiImagesBackend:
                             headers=self._headers(),
                             json=p,
                         )
-                        last_resp = resp
                         if resp.status_code == 200:
                             break
                         if resp.status_code not in {400, 415, 422}:
@@ -480,9 +488,7 @@ class Grok2ApiImagesBackend:
         if resp is None or resp.status_code != 200:
             status = resp.status_code if resp is not None else 0
             text = resp.text[:300] if resp is not None else "no response"
-            raise RuntimeError(
-                f"Grok2API images.edit 失败 HTTP {status}: {text}"
-            )
+            raise RuntimeError(f"Grok2API images.edit 失败 HTTP {status}: {text}")
 
         data = resp.json()
         ref = _extract_image_ref(data)

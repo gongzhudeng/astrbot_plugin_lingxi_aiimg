@@ -1,4 +1,5 @@
 import ast
+import asyncio
 import importlib.util
 import sys
 import types
@@ -106,6 +107,10 @@ class _DummyStarTools:
     def get_data_dir(name: str):
         return Path("/tmp") / name
 
+    @staticmethod
+    async def create_message(**kwargs):
+        return types.SimpleNamespace(**kwargs)
+
 
 class _DummyFilter:
     def __getattr__(self, name):
@@ -122,6 +127,11 @@ class _SubscriptableType:
     @classmethod
     def __class_getitem__(cls, item):
         return cls
+
+
+class _McpValue:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
 
 
 def _clear_modules():
@@ -160,7 +170,11 @@ def _load_module():
     sys.modules[CORE_PACKAGE_NAME] = core_pkg
 
     mcp_mod = types.ModuleType("mcp")
-    mcp_mod.types = types.SimpleNamespace(CallToolResult=type("CallToolResult", (), {}))
+    mcp_mod.types = types.SimpleNamespace(
+        CallToolResult=_McpValue,
+        TextContent=_McpValue,
+        ImageContent=_McpValue,
+    )
     sys.modules["mcp"] = mcp_mod
 
     astrbot_mod = types.ModuleType("astrbot")
@@ -376,6 +390,53 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_background_owner_conflict_retries_until_takeover(self):
+        mod, logger = _load_module()
+
+        class RetryManager:
+            def __init__(self, *args, **kwargs):
+                self.start_calls = 0
+                self.started = False
+                self.closed = False
+
+            async def start(self):
+                self.start_calls += 1
+                if self.start_calls == 1:
+                    raise mod.BackgroundTaskOwnerError("owner busy")
+                self.started = True
+                return []
+
+            async def close(self):
+                self.closed = True
+                self.started = False
+
+            @staticmethod
+            def sanitize_error(exc):
+                return str(exc)
+
+        mod.BackgroundImageTaskManager = RetryManager
+        plugin = mod.GiteeAIImagePlugin(
+            context=types.SimpleNamespace(),
+            config={"features": {"background_llm_image": {"enabled": True}}},
+        )
+        plugin.BACKGROUND_OWNER_RETRY_SECONDS = 0
+        plugin._patch_tool_image_cache_runtime = lambda: None
+        plugin._register_preset_commands = lambda: None
+
+        await plugin.initialize()
+        retry_task = plugin._background_start_task
+
+        self.assertIsNone(plugin.background_tasks)
+        self.assertIsNotNone(retry_task)
+        await asyncio.wait_for(retry_task, timeout=1)
+        self.assertIsInstance(plugin.background_tasks, RetryManager)
+        self.assertEqual(plugin.background_tasks.start_calls, 2)
+        self.assertTrue(
+            any("takeover will retry" in msg for msg in logger.warning_messages)
+        )
+        await plugin.background_tasks.close()
+        plugin.background_tasks = None
+
     async def test_selfie_regex_fallback_handles_direct_slash_command(self):
         mod, _ = _load_module()
         plugin = mod.GiteeAIImagePlugin(
@@ -557,6 +618,105 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(yielded, [])
         self.assertTrue(event.call_llm)
         self.assertTrue(event.stopped)
+
+    async def test_aiimg_generate_defaults_to_exactly_one_single_task(self):
+        mod, _ = _load_module()
+        plugin = mod.GiteeAIImagePlugin(
+            context=types.SimpleNamespace(),
+            config={"features": {"batch": {"max_count": 8}}},
+        )
+        calls = []
+
+        async def fake_single(event, **kwargs):
+            calls.append(("single", event, kwargs))
+            return "single-result"
+
+        async def fake_batch(event, **kwargs):
+            calls.append(("batch", event, kwargs))
+            return "batch-result"
+
+        plugin._aiimg_generate_single = fake_single
+        plugin._aiimg_batch_generate = fake_batch
+        event = object()
+
+        result = await plugin.aiimg_generate(event, "画一个苹果", mode="text")
+
+        self.assertEqual(result, "single-result")
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "single",
+                    event,
+                    {
+                        "prompt": "画一个苹果",
+                        "mode": "text",
+                        "backend": "auto",
+                        "output": "",
+                    },
+                )
+            ],
+        )
+
+    async def test_aiimg_generate_routes_explicit_count_to_one_batch(self):
+        mod, _ = _load_module()
+        plugin = mod.GiteeAIImagePlugin(
+            context=types.SimpleNamespace(),
+            config={"features": {"batch": {"max_count": 8}}},
+        )
+        calls = []
+
+        async def fake_single(event, **kwargs):
+            calls.append(("single", event, kwargs))
+            return "single-result"
+
+        async def fake_batch(event, prompt, **kwargs):
+            calls.append(("batch", event, prompt, kwargs))
+            return "batch-result"
+
+        plugin._aiimg_generate_single = fake_single
+        plugin._aiimg_batch_generate = fake_batch
+        event = object()
+
+        result = await plugin.aiimg_generate(
+            event,
+            "同一主题，不同构图",
+            mode="selfie_ref",
+            backend="provider-a",
+            output="4K",
+            count=3,
+        )
+
+        self.assertEqual(result, "batch-result")
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "batch",
+                    event,
+                    "同一主题，不同构图",
+                    {
+                        "count": 3,
+                        "mode": "selfie_ref",
+                        "backend": "provider-a",
+                        "output": "4K",
+                    },
+                )
+            ],
+        )
+
+    def test_aiimg_count_validation_rejects_invalid_or_excess_values(self):
+        mod, _ = _load_module()
+        plugin = mod.GiteeAIImagePlugin(
+            context=types.SimpleNamespace(),
+            config={"features": {"batch": {"max_count": 4}}},
+        )
+
+        self.assertEqual(plugin._validate_llm_image_count(1), 1)
+        self.assertEqual(plugin._validate_llm_image_count("4"), 4)
+        for value in (0, 5, True, 1.5, "2.0", "invalid"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                plugin._validate_llm_image_count(value)
 
     def test_llm_registers_only_one_image_tool(self):
         tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))

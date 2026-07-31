@@ -293,6 +293,7 @@ class GrokImagesBackend:
                 payload.update(self.extra_body)
             if isinstance(extra_body, dict) and extra_body:
                 payload.update(extra_body)
+            payload["n"] = 1
 
             for attempt in range(self.max_retries):
                 try:

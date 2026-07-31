@@ -5,7 +5,6 @@ import unittest
 from base64 import b64decode
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_NAME = "openai_chat_stream_testpkg"
 CORE_PACKAGE_NAME = f"{PACKAGE_NAME}.core"
@@ -215,7 +214,9 @@ class OpenAIChatStreamRefTests(unittest.TestCase):
         raw = mod._decode_base64_bytes(tiny_png)
 
         self.assertTrue(mod._looks_like_placeholder_image_bytes(raw))
-        self.assertFalse(mod._looks_like_placeholder_image_bytes(b"\xff\xd8\xff" + b"0" * 256))
+        self.assertFalse(
+            mod._looks_like_placeholder_image_bytes(b"\xff\xd8\xff" + b"0" * 256)
+        )
 
     def test_apply_gemini_image_config_adds_common_size_aliases(self):
         mod = _load_module()
@@ -339,6 +340,7 @@ class OpenAIChatEditFallbackTests(unittest.IsolatedAsyncioTestCase):
             api_keys=["test-key"],
             default_model="gemini-3.1-flash-image-preview-4k",
             edit_request_mode="non_stream",
+            extra_body={"n": 2},
         )
         backend._get_client = lambda key: client
 
@@ -353,10 +355,11 @@ class OpenAIChatEditFallbackTests(unittest.IsolatedAsyncioTestCase):
         png_bytes = b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
         )
-        out_path = await backend.edit("改成赛博朋克", [png_bytes])
+        out_path = await backend.edit("改成赛博朋克", [png_bytes], extra_body={"n": 3})
 
         self.assertEqual(out_path, Path("/tmp/result.png"))
         self.assertFalse(stream_called["value"])
+        self.assertEqual(client.chat.completions.calls[0]["extra_body"]["n"], 1)
 
 
 class OpenAIChatGenerateFallbackTests(unittest.IsolatedAsyncioTestCase):
@@ -379,6 +382,7 @@ class OpenAIChatGenerateFallbackTests(unittest.IsolatedAsyncioTestCase):
             api_keys=["test-key"],
             default_model="gemini-3.1-flash-image-preview-4k",
             generate_request_mode="non_stream",
+            extra_body={"n": 2},
         )
         backend._get_client = lambda key: client
 
@@ -390,7 +394,7 @@ class OpenAIChatGenerateFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         backend._stream_chat_completion = _stream_stub
 
-        out_path = await backend.generate("画一个赛博朋克少女")
+        out_path = await backend.generate("画一个赛博朋克少女", extra_body={"n": 3})
 
         self.assertEqual(out_path, Path("/tmp/result.png"))
         self.assertFalse(stream_called["value"])
@@ -398,6 +402,7 @@ class OpenAIChatGenerateFallbackTests(unittest.IsolatedAsyncioTestCase):
             imgr.downloaded_urls, ["https://cdn.example.com/final-generate.png"]
         )
         self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(client.chat.completions.calls[0]["extra_body"]["n"], 1)
 
     async def test_save_single_ref_rewrites_relative_ref_to_origin(self):
         mod = _load_module()
@@ -412,7 +417,9 @@ class OpenAIChatGenerateFallbackTests(unittest.IsolatedAsyncioTestCase):
         out_path = await backend._save_single_ref("/tmp/final.png")
 
         self.assertEqual(out_path, Path("/tmp/result.png"))
-        self.assertEqual(imgr.downloaded_urls, ["https://api.example.com/tmp/final.png"])
+        self.assertEqual(
+            imgr.downloaded_urls, ["https://api.example.com/tmp/final.png"]
+        )
 
     async def test_save_single_ref_rewrites_local_result_host_to_origin_host(self):
         mod = _load_module()
@@ -493,7 +500,9 @@ class OpenAIChatGenerateFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
 
         class _FakeResponse:
-            def __init__(self, status_code: int, headers: dict[str, str], body: bytes = b""):
+            def __init__(
+                self, status_code: int, headers: dict[str, str], body: bytes = b""
+            ):
                 self.status_code = status_code
                 self.headers = headers
                 self._body = body
@@ -559,7 +568,9 @@ class OpenAIChatGenerateFallbackTests(unittest.IsolatedAsyncioTestCase):
             return Path("/tmp/from-images-api.png")
 
         async def _register_stub(images):
-            raise AssertionError("should not use file service fallback when images api succeeds")
+            raise AssertionError(
+                "should not use file service fallback when images api succeeds"
+            )
 
         backend._stream_chat_completion = _stream_stub
         backend._edit_via_images_api = _images_stub

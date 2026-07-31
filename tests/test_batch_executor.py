@@ -3,7 +3,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "core" / "batch_executor.py"
 
@@ -33,6 +32,26 @@ def test_run_batch_keeps_partial_success():
     assert results[0].value == "ok-0-a"
     assert str(results[1].error) == "boom"
     assert results[2].value == "ok-2-c"
+
+
+def test_run_batch_concurrency_one_is_serial_without_extra_tasks():
+    mod = _load_module()
+    state = {"active": 0, "peak": 0, "calls": []}
+
+    async def _runner(index, item):
+        state["calls"].append((index, item))
+        state["active"] += 1
+        state["peak"] = max(state["peak"], state["active"])
+        await asyncio.sleep(0.01)
+        state["active"] -= 1
+        return item
+
+    items = ["a", "b", "c", "d"]
+    results = asyncio.run(mod.run_batch(items, concurrency=1, runner=_runner))
+
+    assert len(results) == len(items)
+    assert state["calls"] == list(enumerate(items))
+    assert state["peak"] == 1
 
 
 def test_run_batch_respects_concurrency_limit():

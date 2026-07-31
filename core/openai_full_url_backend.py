@@ -128,7 +128,9 @@ def _extract_ref_from_text(text: str) -> str | None:
     if s.startswith(("http://", "https://", "/")):
         return s
 
-    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+    if (s.startswith("{") and s.endswith("}")) or (
+        s.startswith("[") and s.endswith("]")
+    ):
         try:
             parsed = json.loads(s)
         except Exception:
@@ -185,7 +187,14 @@ def _extract_image_ref(data: Any) -> str | None:
             if ref:
                 return ref
 
-        for key in ("images", "image_urls", "attachments", "media", "result", "response"):
+        for key in (
+            "images",
+            "image_urls",
+            "attachments",
+            "media",
+            "result",
+            "response",
+        ):
             ref = _extract_image_ref(data.get(key))
             if ref:
                 return ref
@@ -286,6 +295,7 @@ class OpenAIFullURLBackend:
             out.update(self.extra_body)
         if isinstance(extra_body, dict):
             out.update(extra_body)
+        out["n"] = 1
         return out
 
     async def _post_json(
@@ -410,7 +420,9 @@ class OpenAIFullURLBackend:
         try:
             data = resp.json()
         except Exception as exc:
-            raise RuntimeError(f"返回内容不是有效 JSON: {(resp.text or '')[:200]}") from exc
+            raise RuntimeError(
+                f"返回内容不是有效 JSON: {(resp.text or '')[:200]}"
+            ) from exc
 
         ref = _extract_image_ref(data)
         if not ref:

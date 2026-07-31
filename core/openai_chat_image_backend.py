@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import ipaddress
 import inspect
+import ipaddress
 import json
 import re
 import time
@@ -171,7 +171,11 @@ def _rewrite_local_media_url(ref: str, *, base_url: str) -> str:
         parts = urlsplit(s)
     except Exception:
         return s
-    if not parts.scheme or not parts.netloc or not _is_local_media_host(parts.hostname or ""):
+    if (
+        not parts.scheme
+        or not parts.netloc
+        or not _is_local_media_host(parts.hostname or "")
+    ):
         return s
 
     base_parts = urlsplit(str(base_url or "").strip())
@@ -856,10 +860,9 @@ class OpenAIChatImageBackend:
             return merged
 
         request_image_size = image_size
-        if (
-            "gemini-3.1-flash-image-preview-4k" in model_name
-            and str(image_size).strip().upper() in {"4K", "4096X4096", "2K", "2048X2048"}
-        ):
+        if "gemini-3.1-flash-image-preview-4k" in model_name and str(
+            image_size
+        ).strip().upper() in {"4K", "4096X4096", "2K", "2048X2048"}:
             # 该网关的 chat 兼容层对 4K 规格经常直接 503；
             # 实测把 image_config 压到 1K 仍会回 3840x4380 这类高分辨率图，
             # 因此这里只降请求规格，不动 prompt 里的 4K 目标提示。
@@ -947,9 +950,8 @@ class OpenAIChatImageBackend:
             try:
                 return await request_factory()
             except Exception as exc:
-                if (
-                    attempt >= attempts
-                    or not self._is_retryable_chat_image_error(exc, model=model)
+                if attempt >= attempts or not self._is_retryable_chat_image_error(
+                    exc, model=model
                 ):
                     raise
                 logger.warning(
@@ -1069,7 +1071,9 @@ class OpenAIChatImageBackend:
             seen_videos.add(value)
             videos.append(value)
 
-        async def consume_json_body(resp: httpx.Response) -> tuple[list[str], list[str], str]:
+        async def consume_json_body(
+            resp: httpx.Response,
+        ) -> tuple[list[str], list[str], str]:
             raw = await resp.aread()
             body_text = raw.decode("utf-8", errors="ignore")
             try:
@@ -1087,7 +1091,11 @@ class OpenAIChatImageBackend:
                     add_video(video)
                 if len(debug_pieces) < 8 and s.strip():
                     debug_pieces.append(self._sse_debug_snippet(s))
-            return refs, videos, self._sse_debug_snippet(" ".join(debug_pieces) or body_text)
+            return (
+                refs,
+                videos,
+                self._sse_debug_snippet(" ".join(debug_pieces) or body_text),
+            )
 
         t0 = time.time()
         try:
@@ -1137,7 +1145,9 @@ class OpenAIChatImageBackend:
                         add_video(_extract_video_ref_from_content(obj))
 
                         for s in _iter_strings(obj):
-                            image_refs, video_refs = _extract_media_refs_from_sse_text(s)
+                            image_refs, video_refs = _extract_media_refs_from_sse_text(
+                                s
+                            )
                             for ref in image_refs:
                                 add_ref(ref)
                             for video in video_refs:
@@ -1261,7 +1271,9 @@ class OpenAIChatImageBackend:
             return rewritten
 
         split = urlsplit(self.base_url)
-        origin = f"{split.scheme}://{split.netloc}" if split.scheme and split.netloc else ""
+        origin = (
+            f"{split.scheme}://{split.netloc}" if split.scheme and split.netloc else ""
+        )
         if s.startswith("//"):
             return f"{split.scheme}:{s}" if split.scheme else f"https:{s}"
         if s.startswith("/"):
@@ -1351,7 +1363,9 @@ class OpenAIChatImageBackend:
         try:
             from astrbot.api.message_components import Image as AstrImage
         except Exception as e:
-            raise RuntimeError("当前 AstrBot 环境缺少图片文件服务能力，无法回退为 URL 输入") from e
+            raise RuntimeError(
+                "当前 AstrBot 环境缺少图片文件服务能力，无法回退为 URL 输入"
+            ) from e
 
         urls: list[str] = []
         for idx, image_bytes in enumerate(images):
@@ -1359,7 +1373,9 @@ class OpenAIChatImageBackend:
             img_comp = AstrImage.fromFileSystem(str(saved_path))
             register = getattr(img_comp, "register_to_file_service", None)
             if not callable(register):
-                raise RuntimeError("当前 AstrBot Image 组件不支持 register_to_file_service")
+                raise RuntimeError(
+                    "当前 AstrBot Image 组件不支持 register_to_file_service"
+                )
             url = await _resolve_awaitable(register())
             url_text = str(url or "").strip()
             if not url_text:
@@ -1562,7 +1578,10 @@ class OpenAIChatImageBackend:
                 max_bytes = max(
                     256 * 1024,
                     min(
-                        int(getattr(self.imgr, "_media_max_image_bytes", max_bytes) or max_bytes),
+                        int(
+                            getattr(self.imgr, "_media_max_image_bytes", max_bytes)
+                            or max_bytes
+                        ),
                         200 * 1024 * 1024,
                     ),
                 )
@@ -1594,15 +1613,21 @@ class OpenAIChatImageBackend:
                 ) as resp:
                     if resp.status_code in {301, 302, 303, 307, 308}:
                         if redirects >= max_redirects:
-                            raise RuntimeError("too many redirects while downloading trusted image result")
+                            raise RuntimeError(
+                                "too many redirects while downloading trusted image result"
+                            )
                         location = (resp.headers.get("location") or "").strip()
                         if not location:
-                            raise RuntimeError("redirect without location while downloading trusted image result")
+                            raise RuntimeError(
+                                "redirect without location while downloading trusted image result"
+                            )
                         current = urljoin(current, location)
                         redirects += 1
                         continue
                     if resp.status_code != 200:
-                        body_text = (await resp.aread()).decode("utf-8", errors="ignore")
+                        body_text = (await resp.aread()).decode(
+                            "utf-8", errors="ignore"
+                        )
                         raise RuntimeError(
                             f"trusted image result download failed HTTP {resp.status_code}: {body_text[:300]}"
                         )
@@ -1618,7 +1643,9 @@ class OpenAIChatImageBackend:
                             continue
                         total += len(chunk)
                         if total > max_bytes:
-                            raise RuntimeError("trusted image result is too large to download")
+                            raise RuntimeError(
+                                "trusted image result is too large to download"
+                            )
                         chunks.append(chunk)
                     return await self.imgr.save_image(b"".join(chunks))
         finally:
@@ -1690,6 +1717,7 @@ class OpenAIChatImageBackend:
             size=size,
             resolution=resolution,
         )
+        eb["n"] = 1
 
         stream_error: Exception | None = None
         if self._should_try_stream("generate"):
@@ -1794,9 +1822,7 @@ class OpenAIChatImageBackend:
             )
         except Exception as e:
             if stream_error is not None:
-                raise RuntimeError(
-                    f"{e}；且此前流式兜底也失败：{stream_error}"
-                ) from e
+                raise RuntimeError(f"{e}；且此前流式兜底也失败：{stream_error}") from e
             raise
 
     async def edit(
@@ -1830,6 +1856,7 @@ class OpenAIChatImageBackend:
             size=size,
             resolution=resolution,
         )
+        eb["n"] = 1
 
         prefetched_image_urls: list[str] | None = None
         if self._prefer_file_service_url_input:
@@ -1871,10 +1898,14 @@ class OpenAIChatImageBackend:
                         f"chat 返回了视频而不是图片：{videos[0]}（如果想要视频请用 /视频；如果想要图片请换模型或改用 images 接口）"
                     )
                 stream_error = RuntimeError("stream 未解析到图片引用")
-                logger.warning("[OpenAIChatImage][edit] 流式模式未解析到图片，回退非流式")
+                logger.warning(
+                    "[OpenAIChatImage][edit] 流式模式未解析到图片，回退非流式"
+                )
             except Exception as e:
                 stream_error = e
-                logger.warning("[OpenAIChatImage][edit] 流式模式失败，回退非流式: %s", e)
+                logger.warning(
+                    "[OpenAIChatImage][edit] 流式模式失败，回退非流式: %s", e
+                )
 
         parts = self._build_edit_parts(
             self._build_edit_text(
@@ -1898,7 +1929,9 @@ class OpenAIChatImageBackend:
                 )
             except Exception as e:
                 if _is_client_closed_error(e):
-                    logger.warning("[OpenAIChatImage][edit] client 已关闭，重建后重试一次")
+                    logger.warning(
+                        "[OpenAIChatImage][edit] client 已关闭，重建后重试一次"
+                    )
                     client = await self._recreate_client(key)
                     response = await client.chat.completions.create(
                         model=final_model,
@@ -1966,7 +1999,10 @@ class OpenAIChatImageBackend:
             )
             input_mode = "file_service_url"
             try:
-                image_urls = prefetched_image_urls or await self._register_input_image_urls(images)
+                image_urls = (
+                    prefetched_image_urls
+                    or await self._register_input_image_urls(images)
+                )
             except Exception as file_service_exc:
                 if images_api_error is not None:
                     raise RuntimeError(
@@ -2014,7 +2050,5 @@ class OpenAIChatImageBackend:
             )
         except Exception as e:
             if stream_error is not None:
-                raise RuntimeError(
-                    f"{e}；且此前流式兜底也失败：{stream_error}"
-                ) from e
+                raise RuntimeError(f"{e}；且此前流式兜底也失败：{stream_error}") from e
             raise

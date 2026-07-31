@@ -1,13 +1,12 @@
+import importlib.util
+import os
 import sys
+import time
 import types
 import unittest
-import os
-import time
-from tempfile import TemporaryDirectory
 from dataclasses import dataclass
 from pathlib import Path
-import importlib.util
-
+from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_NAME = "batch_result_delivery_testpkg"
@@ -171,6 +170,7 @@ class _Result:
 class _DummyEvent:
     def __init__(self):
         self.sent: list[tuple[str, object]] = []
+        self.unified_msg_origin = "test:origin"
 
     def plain_result(self, text: str):
         return ("plain", text)
@@ -224,9 +224,7 @@ def _load_module():
     sys.modules[CORE_PACKAGE_NAME] = core_pkg
 
     mcp_mod = types.ModuleType("mcp")
-    mcp_mod.types = types.SimpleNamespace(
-        CallToolResult=type("CallToolResult", (), {})
-    )
+    mcp_mod.types = types.SimpleNamespace(CallToolResult=type("CallToolResult", (), {}))
     sys.modules["mcp"] = mcp_mod
 
     astrbot_mod = types.ModuleType("astrbot")
@@ -264,13 +262,17 @@ def _load_module():
         get_astrbot_temp_path=lambda: Path("/tmp"),
     )
 
-    _install_stub_module(f"{CORE_PACKAGE_NAME}.gemini_edit", GeminiEditBackend=_StubBackend)
+    _install_stub_module(
+        f"{CORE_PACKAGE_NAME}.gemini_edit", GeminiEditBackend=_StubBackend
+    )
     _install_stub_module(
         f"{CORE_PACKAGE_NAME}.gemini_flow2api",
         Flow2ApiVideoBackend=_StubBackend,
         GeminiFlow2ApiBackend=_StubBackend,
     )
-    _install_stub_module(f"{CORE_PACKAGE_NAME}.gitee_edit", GiteeEditBackend=_StubBackend)
+    _install_stub_module(
+        f"{CORE_PACKAGE_NAME}.gitee_edit", GiteeEditBackend=_StubBackend
+    )
     _install_stub_module(
         f"{CORE_PACKAGE_NAME}.gitee_sizes",
         GITEE_SUPPORTED_SIZES=["1024x1024"],
@@ -331,7 +333,9 @@ def _load_module():
         run_batch=lambda *args, **kwargs: None,
     )
     _install_stub_module(f"{CORE_PACKAGE_NAME}.debouncer", Debouncer=_StubService)
-    _install_stub_module(f"{CORE_PACKAGE_NAME}.draw_service", ImageDrawService=_StubService)
+    _install_stub_module(
+        f"{CORE_PACKAGE_NAME}.draw_service", ImageDrawService=_StubService
+    )
     _install_stub_module(f"{CORE_PACKAGE_NAME}.edit_router", EditRouter=_StubRouter)
     _install_stub_module(
         f"{CORE_PACKAGE_NAME}.emoji_feedback",
@@ -357,8 +361,12 @@ def _load_module():
         decode_base64_image_payload=lambda *args, **kwargs: b"",
         guess_image_mime_and_ext=lambda *args, **kwargs: ("image/png", ".png"),
     )
-    _install_stub_module(f"{CORE_PACKAGE_NAME}.image_manager", ImageManager=_StubService)
-    _install_stub_module(f"{CORE_PACKAGE_NAME}.nanobanana", NanoBananaService=_StubService)
+    _install_stub_module(
+        f"{CORE_PACKAGE_NAME}.image_manager", ImageManager=_StubService
+    )
+    _install_stub_module(
+        f"{CORE_PACKAGE_NAME}.nanobanana", NanoBananaService=_StubService
+    )
     _install_stub_module(f"{CORE_PACKAGE_NAME}.ref_store", ReferenceStore=_StubStore)
     _install_stub_module(
         f"{CORE_PACKAGE_NAME}.utils",
@@ -485,7 +493,7 @@ class BatchResultDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             event.sent,
-            [("chain", [("video_file", "/tmp/video.mp4")])],
+            [("chain", [("video_file", str(Path("/tmp/video.mp4")))])],
         )
 
     async def test_video_send_ignores_invalid_timeout_config_values(self):

@@ -88,6 +88,16 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
         self.assertEqual(fields["quality"], "auto")
         self.assertEqual(fields["n"], "1")
 
+    def test_build_aiwork_edit_form_fields_forces_single_output(self):
+        fields = self.mod.build_aiwork_edit_form_fields(
+            model="gpt-image-2",
+            prompt="额外加个苹果",
+            size="1024x1024",
+            extra_body={"n": 2},
+        )
+
+        self.assertEqual(fields["n"], "1")
+
     def test_build_aiwork_edit_file_fields_uses_image_array(self):
         png = (
             b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
@@ -105,9 +115,14 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
         second = b"second-image"
         third = b"third-image"
         files = self.mod.build_aiwork_edit_file_fields([first, second, third])
-        self.assertEqual([field for field, _ in files], ["image[]", "image[]", "image[]"])
+        self.assertEqual(
+            [field for field, _ in files], ["image[]", "image[]", "image[]"]
+        )
         self.assertEqual([payload[1] for _, payload in files], [first, second, third])
-        self.assertEqual([payload[0] for _, payload in files], ["input_1.jpg", "input_2.jpg", "input_3.jpg"])
+        self.assertEqual(
+            [payload[0] for _, payload in files],
+            ["input_1.jpg", "input_2.jpg", "input_3.jpg"],
+        )
 
     def test_aiwork_edit_posts_multiple_image_array_fields_in_order(self):
         captured = {}
@@ -156,8 +171,12 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
         self.assertEqual(captured["url"], "https://aiwork.fans/v1/images/edits")
         self.assertEqual(captured["api_key"], "sk-test")
         self.assertEqual(captured["data"]["response_format"], "b64_json")
-        self.assertEqual([field for field, _ in captured["files"]], ["image[]", "image[]"])
-        self.assertEqual([payload[1] for _, payload in captured["files"]], [first, second])
+        self.assertEqual(
+            [field for field, _ in captured["files"]], ["image[]", "image[]"]
+        )
+        self.assertEqual(
+            [payload[1] for _, payload in captured["files"]], [first, second]
+        )
 
     def test_backend_normalizes_aiwork_base_url(self):
         backend = self.mod.OpenAICompatBackend(
@@ -207,6 +226,42 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
         self.assertEqual(captured["api_key"], "sk-test")
         self.assertEqual(captured["payload"]["response_format"], "b64_json")
 
+    def test_aiwork_generate_payload_forces_single_output(self):
+        captured = {}
+
+        class FakeImageManager:
+            async def save_base64_image(self, value):
+                return Path("out.png")
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"ok"}]}'
+            headers = {"content-type": "application/json"}
+            content = b""
+
+            def json(self):
+                return {"data": [{"b64_json": "ok"}]}
+
+        backend = self.mod.OpenAICompatBackend(
+            imgr=FakeImageManager(),
+            base_url="https://aiwork.fans/v1",
+            api_keys=["sk-test"],
+            default_model="gpt-image-2",
+            extra_body={"n": 2},
+        )
+
+        async def fake_post(url, api_key, payload):
+            captured["payload"] = payload
+            return FakeResponse()
+
+        backend._raw_post_json = fake_post
+
+        import asyncio
+
+        asyncio.run(backend.generate("画个苹果", extra_body={"n": 3}))
+
+        self.assertEqual(captured["payload"]["n"], 1)
+
     def test_generic_provider_posts_multiple_image_array_fields_first(self):
         captured = {}
 
@@ -239,11 +294,54 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
 
         import asyncio
 
-        asyncio.run(backend.edit("自拍", [b"first-image", b"second-image"], size="1024x1024"))
+        asyncio.run(
+            backend.edit("自拍", [b"first-image", b"second-image"], size="1024x1024")
+        )
 
         self.assertEqual(captured["url"], "https://lucen.cc/v1/images/edits")
-        self.assertEqual([field for field, _ in captured["files"]], ["image[]", "image[]"])
-        self.assertEqual([payload[1] for _, payload in captured["files"]], [b"first-image", b"second-image"])
+        self.assertEqual(
+            [field for field, _ in captured["files"]], ["image[]", "image[]"]
+        )
+        self.assertEqual(
+            [payload[1] for _, payload in captured["files"]],
+            [b"first-image", b"second-image"],
+        )
+
+    def test_generic_edit_payload_forces_single_output(self):
+        captured = {}
+
+        class FakeImageManager:
+            async def save_base64_image(self, value):
+                return Path("out.png")
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"ok"}]}'
+            headers = {"content-type": "application/json"}
+            content = b""
+
+            def json(self):
+                return {"data": [{"b64_json": "ok"}]}
+
+        backend = self.mod.OpenAICompatBackend(
+            imgr=FakeImageManager(),
+            base_url="https://lucen.cc/v1",
+            api_keys=["sk-test"],
+            default_model="gpt-image-2",
+            extra_body={"n": 2},
+        )
+
+        async def fake_post(url, api_key, data, files):
+            captured["data"] = data
+            return FakeResponse()
+
+        backend._raw_post_multipart = fake_post
+
+        import asyncio
+
+        asyncio.run(backend.edit("自拍", [b"input"], extra_body={"n": 3}))
+
+        self.assertEqual(captured["data"]["n"], "1")
 
     def test_generic_provider_falls_back_to_collage_on_file_format_error(self):
         calls = []
@@ -282,7 +380,9 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
 
         import asyncio
 
-        asyncio.run(backend.edit("自拍", [b"first-image", b"second-image"], size="1024x1024"))
+        asyncio.run(
+            backend.edit("自拍", [b"first-image", b"second-image"], size="1024x1024")
+        )
 
         self.assertEqual(len(calls), 2)
         self.assertIsInstance(calls[0], list)
@@ -303,7 +403,10 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
             content = b""
 
             def json(self):
-                return {"code": "INSUFFICIENT_BALANCE", "message": "Insufficient account balance"}
+                return {
+                    "code": "INSUFFICIENT_BALANCE",
+                    "message": "Insufficient account balance",
+                }
 
         backend = self.mod.OpenAICompatBackend(
             imgr=FakeImageManager(),
@@ -321,7 +424,11 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
         import asyncio
 
         with self.assertRaises(RuntimeError):
-            asyncio.run(backend.edit("自拍", [b"first-image", b"second-image"], size="1024x1024"))
+            asyncio.run(
+                backend.edit(
+                    "自拍", [b"first-image", b"second-image"], size="1024x1024"
+                )
+            )
 
         self.assertEqual(len(calls), 1)
         self.assertIsInstance(calls[0], list)

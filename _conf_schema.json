@@ -4,6 +4,31 @@
     "hint": "先在最底部添加 providers（服务商），再在这里为每个功能选择 provider 链路（第一个=主用，后续=兜底）。",
     "type": "object",
     "items": {
+      "background_llm_image": {
+        "description": "LLM 生图后台任务",
+        "hint": "仅后台化 aiimg_generate 的单图和批量任务；直接命令仍保持同步。后台完成后会自动发送图片并回到当前会话自然回应。仅支持 aiocqhttp / weixin_oc，流式回复开启时自动使用同步路径。",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "type": "bool",
+            "description": "启用 LLM 后台生图",
+            "hint": "默认开启。关闭后 aiimg_generate 会等待图片生成和发送完成。",
+            "default": true
+          },
+          "max_running": {
+            "type": "int",
+            "description": "全局同时运行的图片请求数",
+            "hint": "单图和批量子任务共享此上限。每个图片请求始终只生成 1 张。",
+            "default": 2
+          },
+          "max_queued": {
+            "type": "int",
+            "description": "全局后台图片容量",
+            "hint": "按图片张数计数。一组 4 张会原子占用 4 个容量。",
+            "default": 16
+          }
+        }
+      },
       "draw": {
         "description": "文生图 (Text-to-Image)",
         "type": "object",
@@ -83,8 +108,8 @@
           },
           "batch_concurrency": {
             "type": "int",
-            "description": "文生图批量并发数",
-            "hint": "批量命令执行文生图时，同时并行跑多少个任务。",
+            "description": "文生图批量任务并发上限",
+            "hint": "仅在批量命令或统一工具 count>1 时生效；控制同时执行的子任务数。设为 1 仍支持批量，但会串行执行；单图请求不使用此设置。",
             "default": 2
           },
           "prompt_prefix": {
@@ -158,8 +183,8 @@
           },
           "batch_concurrency": {
             "type": "int",
-            "description": "改图/自拍批量并发数",
-            "hint": "批量命令执行改图或自拍时，同时并行跑多少个任务。",
+            "description": "改图/自拍批量任务并发上限",
+            "hint": "仅在批量命令或统一工具 count>1 时生效；控制同时执行的子任务数。设为 1 仍支持批量，但会串行执行；单图请求不使用此设置。",
             "default": 2
           }
         }

@@ -157,6 +157,7 @@ def build_aiwork_edit_form_fields(
         "n": "1",
     }
     fields.update(extra_body or {})
+    fields["n"] = "1"
     return {k: str(v) for k, v in fields.items()}
 
 
@@ -296,9 +297,7 @@ class OpenAICompatBackend:
             if normalize_size_text(s)
         ]
         self._ratio_defaults = (
-            ratio_defaults_from_sizes(self.allowed_sizes)
-            if self.allowed_sizes
-            else {}
+            ratio_defaults_from_sizes(self.allowed_sizes) if self.allowed_sizes else {}
         )
         if ratio_default_sizes and self.allowed_sizes:
             for ratio, size in ratio_default_sizes.items():
@@ -480,9 +479,7 @@ class OpenAICompatBackend:
             http_client = self._get_http_client()
             if http_client is not None:
                 kwargs["http_client"] = http_client
-        client = AsyncOpenAI(
-            **kwargs
-        )
+        client = AsyncOpenAI(**kwargs)
         self._clients[key] = client
         return client
 
@@ -526,13 +523,13 @@ class OpenAICompatBackend:
                     self._is_retryable_http_status(resp.status_code)
                     and attempt + 1 < attempts
                 ):
-                    await asyncio.sleep(min(2.0, 0.4 * (2 ** attempt)))
+                    await asyncio.sleep(min(2.0, 0.4 * (2**attempt)))
                     continue
                 return resp
             except Exception as exc:
                 last_exc = exc
                 if attempt + 1 < attempts:
-                    await asyncio.sleep(min(2.0, 0.4 * (2 ** attempt)))
+                    await asyncio.sleep(min(2.0, 0.4 * (2**attempt)))
                     continue
         raise RuntimeError(
             f"请求失败（已重试 {self.max_retries} 次）: {last_exc}"
@@ -543,7 +540,8 @@ class OpenAICompatBackend:
         url: str,
         api_key: str,
         data: dict[str, str],
-        files: dict[str, tuple[str, bytes, str]] | list[tuple[str, tuple[str, bytes, str]]],
+        files: dict[str, tuple[str, bytes, str]]
+        | list[tuple[str, tuple[str, bytes, str]]],
     ) -> httpx.Response:
         client = self._get_raw_http_client()
         headers = {"Authorization": f"Bearer {api_key}"}
@@ -557,20 +555,18 @@ class OpenAICompatBackend:
         )
         for attempt in range(attempts):
             try:
-                resp = await client.post(
-                    url, headers=headers, data=data, files=files
-                )
+                resp = await client.post(url, headers=headers, data=data, files=files)
                 if (
                     self._is_retryable_http_status(resp.status_code)
                     and attempt + 1 < attempts
                 ):
-                    await asyncio.sleep(min(2.0, 0.4 * (2 ** attempt)))
+                    await asyncio.sleep(min(2.0, 0.4 * (2**attempt)))
                     continue
                 return resp
             except Exception as exc:
                 last_exc = exc
                 if attempt + 1 < attempts:
-                    await asyncio.sleep(min(2.0, 0.4 * (2 ** attempt)))
+                    await asyncio.sleep(min(2.0, 0.4 * (2**attempt)))
                     continue
         raise RuntimeError(
             f"请求失败（已重试 {self.max_retries} 次）: {last_exc}"
@@ -580,9 +576,7 @@ class OpenAICompatBackend:
         self, resp: httpx.Response, *, endpoint_url: str
     ) -> Path:
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"HTTP {resp.status_code}: {(resp.text or '')[:300]}"
-            )
+            raise RuntimeError(f"HTTP {resp.status_code}: {(resp.text or '')[:300]}")
 
         content_type = (resp.headers.get("content-type") or "").lower()
         if content_type.startswith("image/"):
@@ -634,7 +628,11 @@ class OpenAICompatBackend:
         if data is None:
             try:
                 model_dump = getattr(resp, "model_dump", None)
-                dumped = await _resolve_awaitable(model_dump()) if callable(model_dump) else None
+                dumped = (
+                    await _resolve_awaitable(model_dump())
+                    if callable(model_dump)
+                    else None
+                )
             except Exception:
                 dumped = None
             if isinstance(dumped, dict):
@@ -699,6 +697,7 @@ class OpenAICompatBackend:
         eb.update(extra_body or {})
         if eb:
             payload.update(eb)
+        payload["n"] = 1
 
         url = f"{self.base_url}/images/generations"
         t0 = time.time()
@@ -716,9 +715,8 @@ class OpenAICompatBackend:
                 )
             body_text = (resp.text or "")[:500]
             if resp.status_code >= 400:
-                if (
-                    final_size == "4096x4096"
-                    and self._is_invalid_size_error(Exception(body_text))
+                if final_size == "4096x4096" and self._is_invalid_size_error(
+                    Exception(body_text)
                 ):
                     logger.warning(
                         "[OpenAICompat][generate] 4096x4096 可能不受该后端支持，尝试降级到 2048x2048: %s",
@@ -728,9 +726,7 @@ class OpenAICompatBackend:
                     resp = await self._raw_post_json(url, key, payload)
                     body_text = (resp.text or "")[:500]
                 if resp.status_code >= 400:
-                    raise RuntimeError(
-                        f"HTTP {resp.status_code}: {body_text}"
-                    )
+                    raise RuntimeError(f"HTTP {resp.status_code}: {body_text}")
         except Exception as e:
             logger.error(
                 f"[OpenAICompat][generate] API 调用失败，base_url={self.base_url}，耗时: {time.time() - t0:.2f}s: {e}"
@@ -792,6 +788,7 @@ class OpenAICompatBackend:
         eb.update(extra_body or {})
         if eb:
             form_data.update(eb)
+        form_data["n"] = 1
 
         url = f"{self.base_url}/images/edits"
 
@@ -820,7 +817,9 @@ class OpenAICompatBackend:
                 )
             resp = await self._raw_post_multipart(url, key, str_data, files)
             body_text = (resp.text or "")[:500]
-            if len(images) > 1 and _should_fallback_collage(resp.status_code, body_text):
+            if len(images) > 1 and _should_fallback_collage(
+                resp.status_code, body_text
+            ):
                 logger.warning(
                     "[OpenAICompat][edit] 多文件上传失败，退回旧拼图单图模式: HTTP %s: %s",
                     resp.status_code,
@@ -839,9 +838,8 @@ class OpenAICompatBackend:
                 )
             body_text = (resp.text or "")[:500]
             if resp.status_code >= 400:
-                if (
-                    final_size == "4096x4096"
-                    and self._is_invalid_size_error(Exception(body_text))
+                if final_size == "4096x4096" and self._is_invalid_size_error(
+                    Exception(body_text)
                 ):
                     logger.warning(
                         "[OpenAICompat][edit] 4096x4096 可能不受该后端支持，尝试降级到 2048x2048: %s",
@@ -851,9 +849,7 @@ class OpenAICompatBackend:
                     resp = await self._raw_post_multipart(url, key, str_data, files)
                     body_text = (resp.text or "")[:500]
                 if resp.status_code >= 400:
-                    raise RuntimeError(
-                        f"HTTP {resp.status_code}: {body_text}"
-                    )
+                    raise RuntimeError(f"HTTP {resp.status_code}: {body_text}")
         except Exception as e:
             logger.error(
                 f"[OpenAICompat][edit] API 调用失败，base_url={self.base_url}，耗时: {time.time() - t0:.2f}s: {e}"

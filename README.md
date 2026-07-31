@@ -1,6 +1,6 @@
 # 灵犀 · AI生图
 
-[![Plugin Version](https://img.shields.io/badge/Version-1.0.0-4f8cc9?style=for-the-badge)](./CHANGELOG.md)
+[![Plugin Version](https://img.shields.io/badge/Version-1.2.0-4f8cc9?style=for-the-badge)](./CHANGELOG.md)
 [![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.16.0%2C%20%3C5-ff69b4?style=for-the-badge)](https://github.com/AstrBotDevs/AstrBot)
 [![Platform](https://img.shields.io/badge/Primary-aiocqhttp-4caf50?style=for-the-badge)](#平台与限制)
 
@@ -10,7 +10,7 @@
 > 本插件基于原 AstrBot Gitee AI 图像生成插件改造，感谢原作者木有知、Zhalslar 的开源贡献。
 
 > [!IMPORTANT]
-> 这份文档对应灵犀 · AI生图 `1.0.0` 配置结构。
+> 这份文档对应灵犀 · AI生图 `1.2.0` 配置结构。
 >
 > - `v4` 与旧版 `v3 / v2` 配置不兼容，升级后请重新检查 WebUI 配置。
 > - 插件主维护场景是 `QQ / aiocqhttp`，并针对个人微信 `weixin_oc` 增加了发送图片前优化。
@@ -19,6 +19,10 @@
 
 ## 新版本重点
 
+- `LLM tool` 统一为 `aiimg_generate(count=1)`；`count>1` 进入内部批量规划，不再暴露独立批量工具
+- `aiimg_generate` 默认后台执行，接单后即可继续聊天；图片完成后自动发送并在原会话自然回应
+- 后台单图与批量共享全局容量和 provider 并发限制，每个 provider 子请求仍固定 `n=1`
+- 后台仅用于 LLM Tool；`/批量n`、`/自拍`、`/改图` 等手动命令保持同步语义
 - 新增文生图预设：`/文生图 预设名 补充提示词`
 - 新增统一批量命令：`/批量n aiimg ...`、`/批量n aiedit ...`、`/批量n 自拍 ...`
 - 支持批量配合预设：`/批量n 文生图 预设名 补充提示词`、`/批量n 改图预设名 补充提示词`
@@ -37,7 +41,7 @@
 - 图生视频 / 文生视频（取决于所选后端能力）
 - 文生图预设、改图预设、视频预设
 - 指令批量出图
-- `LLM tool` 单图调用
+- `LLM tool` 统一单图 / 批量调用
 
 核心设计是把 **服务商实例 `providers`** 和 **功能链路 `features.*.chain`** 分开。你可以给同一类能力挂多个 provider，插件会按链路顺序兜底切换。
 
@@ -209,6 +213,9 @@ Q版化:Convert to chibi illustration style
 - 单次数量上限由 `features.batch.max_count` 控制，默认 `8`
 - 文生图批量并发由 `features.draw.batch_concurrency` 控制，默认 `2`
 - 改图 / 自拍批量并发由 `features.edit.batch_concurrency` 控制，默认 `2`
+- 批量并发数只限制已经明确创建的批量任务，不会把单图请求扩成多张
+- 并发数设为 `1` 不会关闭批量，只会让批量子任务逐个串行执行
+- 每个 provider 子请求固定 `n=1`；批量通过多个独立单图请求实现，避免服务商额外生成未被插件消费的图片
 - 改图批量和自拍批量都要求当前消息里能读到输入图片；文生图批量不需要图片
 - 批量结果会按顺序直接发送单张图片
 - 除原插件自带表情反馈外，不额外发送标题、提示词、状态、失败摘要这类通知文本
@@ -272,6 +279,20 @@ Q版化:Convert to chibi illustration style
 
 ### `aiimg_generate`
 
+统一工具参数为 `aiimg_generate(prompt, mode, backend, output, count=1)`。`count=1` 执行一次单图流程；只有用户明确要求多张或一组图片时才设置 `count>1`，并进入内部批量规划与执行。数量超过 `features.batch.max_count` 会直接拒绝，不会静默缩减。
+
+在受支持环境中，`aiimg_generate` 默认使用后台任务：工具会在输入图片固化、容量预留和任务登记完成后立即返回，单图不会等待 provider，批量也不会等待 planner。当前 Agent 回合因此可以尽快结束，等待期间的新消息会作为正常新回合处理；图片按生成计划发送后，插件会在原会话提交一次自然的终态回应。
+
+以下情况会自动回到原同步链路，不创建半成品后台任务：
+
+- `features.background_llm_image.enabled=false`
+- 平台不是 `aiocqhttp` 或 `weixin_oc`
+- AstrBot 开启 streaming response
+- 当前事件无法取得稳定 conversation 或平台不具备事件重建能力
+- 后台任务账本初始化失败或当前不可用
+
+手动 `/批量n ...`、`/自拍`、`/改图` 等命令不走该后台链路，原命令时序保持不变。后台任务可用 `/stop` 取消；成功执行 `/reset` 或 `/new` 后，旧会话任务会被取消并与新会话隔离。
+
 模型只需要提供完整提示词并选择业务模式：
 
 - `selfie_ref`：生成固定人物本人的自拍、生活照或穿搭照。用户附带或引用的图片可作为服装、姿势、构图或场景参考。
@@ -311,11 +332,19 @@ Q版化:Convert to chibi illustration style
 
 ## 关键配置项
 
+### LLM 后台生图
+
+- `features.background_llm_image.enabled`：是否后台执行 `aiimg_generate`，默认 `true`
+- `features.background_llm_image.max_running`：单图与批量子任务共享的全局 provider 并发上限，默认 `2`
+- `features.background_llm_image.max_queued`：按图片张数计算的全局后台容量，默认 `16`；一组 4 张会原子占用 4 个容量
+
+后台任务使用插件数据目录中的 SQLite 账本持久化状态和发送 receipt。发送边界发生异常时，插件会把状态记为无法确认，不会盲目重发可能已经送达的图片。
+
 ### 批量相关
 
 - `features.batch.max_count`：单次批量最大张数
-- `features.draw.batch_concurrency`：文生图批量并发
-- `features.edit.batch_concurrency`：改图 / 自拍批量并发
+- `features.draw.batch_concurrency`：文生图批量任务并发上限，仅在 `count>1` 或批量命令时生效；设为 `1` 时串行执行
+- `features.edit.batch_concurrency`：改图 / 自拍批量任务并发上限，仅在 `count>1` 或批量命令时生效；设为 `1` 时串行执行
 
 ### 并发与防抖
 
@@ -350,6 +379,8 @@ Q版化:Convert to chibi illustration style
 
 ### 已知平台限制
 
+- LLM 后台生图仅在 `aiocqhttp` 和 `weixin_oc` 启用；其他平台自动使用同步链路
+- AstrBot 开启 streaming response 时，LLM 生图自动使用同步链路
 - 批量结果默认就是普通消息逐张发送
 - 视频发送依赖适配器是否支持 `Video.fromFileSystem` 或 `Video.fromURL`
 - 某些需要 URL 回退输入的后端，依赖当前 AstrBot 环境具备文件服务能力
