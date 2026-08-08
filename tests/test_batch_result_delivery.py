@@ -89,6 +89,11 @@ class _DummyPlain:
         self.kwargs = kwargs
 
 
+class _DummyTextPart(_DummyPlain):
+    def mark_as_temp(self):
+        return self
+
+
 class _DummyImage:
     def __init__(self, path: str = "", **kwargs):
         self.path = path

@@ -656,6 +656,7 @@ class ProviderRegistry:
             backend: object = GrokVideoService(settings=p)
         elif template_key == "grok2api_video":
             from .grok2api_video_service import Grok2ApiVideoService
+
             backend = Grok2ApiVideoService(settings=p)
         elif template_key == "flow2api_video":
             settings = {

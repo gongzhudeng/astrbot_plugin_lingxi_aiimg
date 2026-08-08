@@ -239,7 +239,8 @@ async def test_single_tool_returns_before_provider_finishes(tmp_path):
     payload = json.loads(result.content[0].text)
 
     assert payload["status"] == "accepted"
-    assert payload["effective_prompt"] == "take a portrait"
+    assert payload["prompt"] == "take a portrait"
+    assert "effective_prompt" not in payload
     await asyncio.wait_for(provider_started.wait(), timeout=1)
     record = await manager.get_task(payload["task_id"])
     assert record["state"] == "running"
@@ -249,17 +250,62 @@ async def test_single_tool_returns_before_provider_finishes(tmp_path):
     await manager.close()
 
 
-def test_terminal_tool_filter_does_not_mutate_shared_tool_set():
+def test_terminal_tool_set_preserves_shared_tool_schema():
     mod, _ = _load_module()
     image_tool = types.SimpleNamespace(name="aiimg_generate")
     other_tool = types.SimpleNamespace(name="search")
     shared = types.SimpleNamespace(tools=[image_tool, other_tool])
 
-    filtered = mod.GiteeAIImagePlugin._without_image_generation_tools(shared)
+    plugin = _plugin(mod, manager=None)
+    plugin.context = types.SimpleNamespace(
+        get_llm_tool_manager=lambda: types.SimpleNamespace(
+            get_full_tool_set=lambda: shared
+        )
+    )
 
-    assert filtered is not shared
-    assert [tool.name for tool in filtered.tools] == ["search"]
+    assert plugin._terminal_tool_set() is shared
     assert [tool.name for tool in shared.tools] == ["aiimg_generate", "search"]
+
+
+@pytest.mark.asyncio
+async def test_background_status_is_appended_as_temporary_user_part(tmp_path):
+    mod, _ = _load_module()
+    manager = types.SimpleNamespace(
+        scope_hash=lambda *args: "scope",
+        get_task=lambda task_id: _async_value(
+            {
+                "task_id": task_id,
+                "task_kind": "single",
+                "state": "completed",
+                "mode": "draw",
+                "user_prompt": "original prompt",
+                "image_sent": True,
+                "delivery_state": "confirmed",
+            }
+        ),
+    )
+    plugin = _plugin(mod, manager)
+    plugin.background_tasks = manager
+    event = _Event()
+    event.set_extra("_gitee_bg_task_id", "task-1")
+    req = types.SimpleNamespace(
+        prompt="current prompt",
+        system_prompt="stable system",
+        extra_user_content_parts=[],
+        func_tool=types.SimpleNamespace(tools=[]),
+        conversation=types.SimpleNamespace(cid="conversation"),
+    )
+
+    await plugin.inject_background_image_tasks(event, req)
+
+    assert req.prompt == "current prompt"
+    assert req.system_prompt == "stable system"
+    assert len(req.extra_user_content_parts) == 1
+    assert "original prompt" in req.extra_user_content_parts[0].text
+
+
+async def _async_value(value):
+    return value
 
 
 @pytest.mark.asyncio
@@ -281,40 +327,12 @@ async def test_internal_completion_handler_runs_agent_once_then_stops_pipeline()
     yielded = [item async for item in plugin.handle_background_completion_event(event)]
 
     assert yielded == [request]
-    assert [tool.name for tool in request.func_tool.tools] == ["search"]
-    assert event.call_llm is True
-    assert event.stopped is True
-
-
-@pytest.mark.asyncio
-async def test_terminal_llm_hook_removes_image_tool_without_affecting_normal_request():
-    mod, _ = _load_module()
-    plugin = _plugin(mod, manager=None)
-    image_tool = types.SimpleNamespace(name="aiimg_generate")
-    other_tool = types.SimpleNamespace(name="search")
-
-    terminal_event = _Event()
-    terminal_event.set_extra(mod._BACKGROUND_COMPLETION_EVENT_EXTRA, True)
-    terminal_request = types.SimpleNamespace(
-        func_tool=types.SimpleNamespace(tools=[image_tool, other_tool])
-    )
-    await plugin.enforce_background_completion_tool_contract(
-        terminal_event, terminal_request
-    )
-
-    normal_event = _Event()
-    normal_tools = types.SimpleNamespace(tools=[image_tool, other_tool])
-    normal_request = types.SimpleNamespace(func_tool=normal_tools)
-    await plugin.enforce_background_completion_tool_contract(
-        normal_event, normal_request
-    )
-
-    assert [tool.name for tool in terminal_request.func_tool.tools] == ["search"]
-    assert normal_request.func_tool is normal_tools
-    assert [tool.name for tool in normal_request.func_tool.tools] == [
+    assert [tool.name for tool in request.func_tool.tools] == [
         "aiimg_generate",
         "search",
     ]
+    assert event.call_llm is True
+    assert event.stopped is True
 
 
 @pytest.mark.asyncio
@@ -381,7 +399,10 @@ async def test_same_umo_terminal_notifications_wait_for_send_confirmation(tmp_pa
     assert first_event.get_extra(mod._BACKGROUND_COMPLETION_EVENT_EXTRA) is True
     assert first_event.get_extra("provider_request") is None
     first_request = first_event.get_extra(mod._BACKGROUND_COMPLETION_REQUEST_EXTRA)
-    assert [tool.name for tool in first_request.func_tool.tools] == ["search"]
+    assert [tool.name for tool in first_request.func_tool.tools] == [
+        "aiimg_generate",
+        "search",
+    ]
     assert [tool.name for tool in shared_tools.tools] == [
         "aiimg_generate",
         "search",

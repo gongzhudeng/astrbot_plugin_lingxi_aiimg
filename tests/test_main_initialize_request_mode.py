@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -85,6 +86,15 @@ class _StubPlannedPromptItem:
     title: str = ""
     prompt: str = ""
     variation_focus: str = ""
+
+
+class _DummyTextPart:
+    def __init__(self, text: str = "", **kwargs):
+        self.text = text
+        self.kwargs = kwargs
+
+    def mark_as_temp(self):
+        return self
 
 
 class _DummyMessageComponent:
@@ -206,6 +216,10 @@ def _load_module():
         Context=type("Context", (), {}),
         Star=_DummyStar,
         StarTools=_DummyStarTools,
+    )
+    _install_stub_module(
+        "astrbot.core.agent.message",
+        TextPart=_DummyTextPart,
     )
     _install_stub_module(
         "astrbot.core.utils.astrbot_path",
@@ -749,6 +763,76 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
         self.assertEqual(image_tools, ["aiimg_generate"])
+
+    def test_image_history_note_contains_only_original_prompt_and_normalized_mode(self):
+        mod, _ = _load_module()
+        plugin = object.__new__(mod.GiteeAIImagePlugin)
+
+        for raw_mode, mode in (
+            ("text", "text"),
+            ("edit", "edit"),
+            ("selfie", "selfie_ref"),
+        ):
+            note = plugin._build_image_history_note(
+                prompt="user prompt",
+                mode=raw_mode,
+            )
+            self.assertIn(f"Mode: {mode}", note)
+            self.assertIn("Prompt: user prompt", note)
+            self.assertNotIn("effective_prompt", note)
+            self.assertNotIn("internal rule", note)
+            self.assertNotIn("prompt prefix", note)
+
+    async def test_image_history_persists_one_assistant_note_and_is_idempotent(self):
+        mod, _ = _load_module()
+        plugin = object.__new__(mod.GiteeAIImagePlugin)
+        conversation = types.SimpleNamespace(cid="conversation", history="[]")
+
+        class ConversationManager:
+            async def get_curr_conversation_id(self, origin):
+                return "conversation"
+
+            async def get_conversation(self, origin, conversation_id):
+                return conversation
+
+            async def update_conversation(self, origin, conversation_id, **changes):
+                conversation.history = json.dumps(
+                    changes["history"], ensure_ascii=False
+                )
+
+        plugin.context = types.SimpleNamespace(
+            conversation_manager=ConversationManager()
+        )
+        event = types.SimpleNamespace(
+            unified_msg_origin="platform:user",
+            get_extra=lambda key, default=None: default,
+        )
+
+        await plugin._append_image_history_note(
+            event,
+            prompt="original prompt",
+            mode="selfie_ref",
+            dedupe_key="task-1",
+        )
+        await plugin._append_image_history_note(
+            event,
+            prompt="original prompt",
+            mode="selfie_ref",
+            dedupe_key="task-1",
+        )
+
+        history = json.loads(conversation.history)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["role"], "assistant")
+        self.assertIn("Mode: selfie_ref", history[0]["content"])
+        self.assertIn("Prompt: original prompt", history[0]["content"])
+        self.assertNotIn("effective_prompt", history[0]["content"])
+        self.assertNotIn("reference_source", history[0]["content"])
+        self.assertNotIn("media_id", history[0]["content"])
+
+    def test_metadata_version_is_current(self):
+        metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
+        self.assertIn("version: 1.2.2", metadata)
 
     def test_selfie_prompt_describes_fixed_and_user_reference_ranges(self):
         mod, _ = _load_module()

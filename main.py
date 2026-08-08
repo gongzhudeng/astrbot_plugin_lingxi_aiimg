@@ -12,7 +12,6 @@
 
 import asyncio
 import base64
-import copy
 import hashlib
 import io
 import json
@@ -95,7 +94,6 @@ _EVENT_MESSAGE_ALL = getattr(getattr(filter, "EventMessageType", object()), "ALL
 _BATCH_COMMAND_PATTERN = re.compile(r"[/!！.。．]批量(?:\s*\d+|\d+)")
 _BACKGROUND_COMPLETION_EVENT_EXTRA = "_gitee_bg_internal_completion"
 _BACKGROUND_COMPLETION_REQUEST_EXTRA = "_gitee_bg_completion_request"
-_IMAGE_GENERATION_TOOL_NAMES = frozenset({"aiimg_generate"})
 _async_pause = asyncio.sleep
 
 
@@ -425,6 +423,81 @@ class GiteeAIImagePlugin(Star):
             return f"延续上一张自拍要求：{previous_prompt}"
         return f"延续上一张自拍要求：{previous_prompt}；本次新增要求：{current_prompt}"
 
+    @staticmethod
+    def _normalize_image_history_mode(mode: Any) -> str:
+        value = str(mode or "").strip().lower()
+        if value in {"selfie_ref", "selfie", "ref"}:
+            return "selfie_ref"
+        if value in {"edit", "img2img", "aiedit"}:
+            return "edit"
+        return "text"
+
+    @staticmethod
+    def _image_history_prompt_for_spec(spec: ImageTaskSpec) -> str:
+        user_prompt = str(getattr(spec, "user_prompt", "") or "").strip()
+        preset_name = str(getattr(spec, "preset_name", "") or "").strip()
+        if preset_name and user_prompt:
+            return f"{preset_name}: {user_prompt}"
+        return user_prompt or preset_name
+
+    def _build_image_history_note(
+        self,
+        *,
+        prompt: Any,
+        mode: Any,
+        count: int = 1,
+    ) -> str:
+        normalized_prompt = self._truncate_text(prompt, limit=320)
+        normalized_mode = self._normalize_image_history_mode(mode)
+        if count > 1:
+            fact = f"Generated {count} images"
+        elif normalized_mode == "selfie_ref":
+            fact = "Took one photo"
+        else:
+            fact = "Generated one image"
+        return (
+            f"[AI image] {fact}. Mode: {normalized_mode}. "
+            f"Prompt: {normalized_prompt or '(empty)'}"
+        )
+
+    async def _append_image_history_note(
+        self,
+        event: AstrMessageEvent,
+        *,
+        prompt: Any,
+        mode: Any,
+        count: int = 1,
+        dedupe_key: str | None = None,
+    ) -> None:
+        await self._append_plugin_conversation_note(
+            event,
+            self._build_image_history_note(prompt=prompt, mode=mode, count=count),
+            dedupe_key=dedupe_key,
+        )
+
+    @staticmethod
+    def _image_history_dedupe_key(
+        event: AstrMessageEvent,
+        *,
+        prompt: Any,
+        mode: Any,
+        count: int = 1,
+        task_id: str = "",
+    ) -> str | None:
+        if task_id:
+            return f"background-image:{task_id}"
+        message_id = str(
+            getattr(getattr(event, "message_obj", None), "message_id", "") or ""
+        ).strip()
+        origin = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not message_id or not origin:
+            return None
+        return (
+            f"image:{origin}:{message_id}:"
+            f"{GiteeAIImagePlugin._normalize_image_history_mode(mode)}:"
+            f"{max(1, int(count or 1))}:{str(prompt or '').strip()}"
+        )
+
     def _build_image_task_meta(
         self,
         *,
@@ -468,10 +541,6 @@ class GiteeAIImagePlugin(Star):
             "continue_with": str(task_meta.get("continue_with") or mode).strip()
             or mode,
             "user_prompt": self._truncate_text(task_meta.get("user_prompt"), limit=180),
-            "effective_prompt": self._truncate_text(
-                task_meta.get("effective_prompt"), limit=260
-            ),
-            "reference_source": str(task_meta.get("reference_source") or "").strip(),
             "reference_count": int(task_meta.get("reference_count") or 0),
             "extra_reference_count": int(task_meta.get("extra_reference_count") or 0),
             "follow_up": bool(task_meta.get("follow_up", False)),
@@ -524,10 +593,39 @@ class GiteeAIImagePlugin(Star):
         return conversation
 
     async def _append_plugin_conversation_note(
-        self, event: AstrMessageEvent, note: str
+        self,
+        event: AstrMessageEvent,
+        note: str,
+        *,
+        dedupe_key: str | None = None,
+    ) -> None:
+        lock = getattr(self, "_conversation_history_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._conversation_history_lock = lock
+        async with lock:
+            await self._append_plugin_conversation_note_locked(
+                event,
+                note,
+                dedupe_key=dedupe_key,
+            )
+
+    async def _append_plugin_conversation_note_locked(
+        self,
+        event: AstrMessageEvent,
+        note: str,
+        *,
+        dedupe_key: str | None,
     ) -> None:
         note = str(note or "").strip()
         if not note:
+            return
+
+        dedupe_keys = getattr(self, "_conversation_note_dedupe_keys", None)
+        if dedupe_keys is None:
+            dedupe_keys = {}
+            self._conversation_note_dedupe_keys = dedupe_keys
+        if dedupe_key and dedupe_key in dedupe_keys:
             return
 
         conv_mgr = getattr(self.context, "conversation_manager", None)
@@ -554,9 +652,16 @@ class GiteeAIImagePlugin(Star):
                 )
                 history = []
 
-        history.append(
-            {"role": "user", "content": "Output your last task result below."}
-        )
+        if any(
+            isinstance(item, dict)
+            and item.get("role") == "assistant"
+            and item.get("content") == note
+            for item in history[-20:]
+        ):
+            if dedupe_key:
+                dedupe_keys[dedupe_key] = None
+            return
+
         history.append({"role": "assistant", "content": note})
 
         try:
@@ -572,6 +677,10 @@ class GiteeAIImagePlugin(Star):
             )
             return
 
+        if dedupe_key:
+            dedupe_keys[dedupe_key] = None
+            while len(dedupe_keys) > 256:
+                dedupe_keys.pop(next(iter(dedupe_keys)))
         try:
             conversation.history = json.dumps(history, ensure_ascii=False)
         except Exception:
@@ -713,25 +822,11 @@ class GiteeAIImagePlugin(Star):
                 self._delivery_target_from_record(record),
             )
 
-    @staticmethod
-    def _without_image_generation_tools(tool_set):
-        tools = getattr(tool_set, "tools", None)
-        if not isinstance(tools, list):
-            return tool_set
-        filtered = copy.copy(tool_set)
-        filtered.tools = [
-            tool
-            for tool in tools
-            if str(getattr(tool, "name", "") or "") not in _IMAGE_GENERATION_TOOL_NAMES
-        ]
-        return filtered
-
     def _terminal_tool_set(self):
         try:
-            tool_set = self.context.get_llm_tool_manager().get_full_tool_set()
+            return self.context.get_llm_tool_manager().get_full_tool_set()
         except (AttributeError, RuntimeError):
             return None
-        return self._without_image_generation_tools(tool_set)
 
     @filter.event_message_type(_EVENT_MESSAGE_ALL, priority=100_000)
     async def handle_background_completion_event(self, event: AstrMessageEvent):
@@ -741,9 +836,6 @@ class GiteeAIImagePlugin(Star):
         if request is None:
             event.stop_event()
             return
-        request.func_tool = self._without_image_generation_tools(
-            getattr(request, "func_tool", None)
-        )
         event.should_call_llm(True)
         yield request
         event.stop_event()
@@ -793,8 +885,9 @@ class GiteeAIImagePlugin(Star):
                 "task_kind": record.get("task_kind"),
                 "state": record.get("state"),
                 "mode": record.get("mode"),
-                "user_prompt": record.get("user_prompt"),
-                "effective_prompt": record.get("effective_prompt"),
+                "user_prompt": self._truncate_text(
+                    record.get("user_prompt"), limit=320
+                ),
                 "requested_count": record.get("requested_count"),
                 "planned_count": record.get("planned_count"),
                 "generated_count": record.get("generated_count"),
@@ -819,25 +912,6 @@ class GiteeAIImagePlugin(Star):
         extra_parts = getattr(req, "extra_user_content_parts", None)
         if isinstance(extra_parts, list) and TextPart is not None:
             extra_parts.append(TextPart(text=block).mark_as_temp())
-        else:
-            req.system_prompt = (
-                str(getattr(req, "system_prompt", "") or "") + "\n" + block
-            )
-
-        if exact_task_id:
-            req.func_tool = self._without_image_generation_tools(
-                getattr(req, "func_tool", None)
-            )
-
-    @filter.on_llm_request(priority=-100_000)
-    async def enforce_background_completion_tool_contract(
-        self, event: AstrMessageEvent, req
-    ) -> None:
-        if not event.get_extra(_BACKGROUND_COMPLETION_EVENT_EXTRA, False):
-            return
-        req.func_tool = self._without_image_generation_tools(
-            getattr(req, "func_tool", None)
-        )
 
     @filter.event_message_type(_EVENT_MESSAGE_ALL, priority=10)
     async def handle_background_session_commands(self, event: AstrMessageEvent) -> None:
@@ -1973,6 +2047,11 @@ class GiteeAIImagePlugin(Star):
                 await mark_failed(event)
                 return
             await self._save_last_image_task_meta(event, executed.task_meta)
+            await self._append_image_history_note(
+                event,
+                prompt=self._image_history_prompt_for_spec(spec),
+                mode=executed.task_meta.get("mode"),
+            )
             await mark_success(event)
         except Exception as exc:
             logger.error("[文生图预设] 失败: %s", exc, exc_info=True)
@@ -2044,6 +2123,11 @@ class GiteeAIImagePlugin(Star):
 
             # 标记成功
             await mark_success(event)
+            await self._append_image_history_note(
+                event,
+                prompt=prompt,
+                mode="text",
+            )
             logger.info(
                 f"[文生图] 完成: {prompt[:30] if prompt else '文生图'}..., 耗时={t_end - t_start:.2f}s"
             )
@@ -2086,9 +2170,15 @@ class GiteeAIImagePlugin(Star):
             specs = [parsed.spec for _ in range(parsed.batch_count)]
             results = await self._run_batch_specs(event, specs)
             title = f"{self._batch_mode_label(parsed.spec)} x{parsed.batch_count}"
-            await self._send_batch_results(event, results, title=title)
-            if any(result.success and result.value for result in results):
-                await self._remember_batch_success(event, results)
+            sent_results = await self._send_batch_results(event, results, title=title)
+            if sent_results:
+                await self._remember_batch_success(
+                    event,
+                    sent_results,
+                    prompt=self._image_history_prompt_for_spec(parsed.spec),
+                    mode=parsed.spec.mode,
+                    count=len(sent_results),
+                )
                 await mark_success(event)
             else:
                 await mark_failed(event)
@@ -2627,6 +2717,11 @@ class GiteeAIImagePlugin(Star):
             output(string): 可选输出尺寸或分辨率，例如 2048x2048 或 4K。
             count(number): 生成数量，默认 1；用户明确要求多张或一组图片时设置为 2 至配置上限。
         """
+        get_extra = getattr(event, "get_extra", None)
+        if callable(get_extra) and get_extra(_BACKGROUND_COMPLETION_EVENT_EXTRA, False):
+            return self._llm_tool_text_result(
+                "This is a background completion turn. Do not start another image task."
+            )
         prompt = (prompt or "").strip()
         mode = (mode or "auto").strip().lower()
         try:
@@ -3061,17 +3156,21 @@ class GiteeAIImagePlugin(Star):
                 size=size,
                 resolution=resolution,
             )
-            await self._send_batch_results(
+            sent_results = await self._send_batch_results(
                 event,
                 results,
                 title=f"LLM 批量{self._batch_mode_label(specs[0])} x{len(specs)}",
             )
-            success_count = sum(
-                1 for result in results if result.success and result.value
-            )
+            success_count = len(sent_results)
             failed_count = len(results) - success_count
-            if success_count > 0:
-                await self._remember_batch_success(event, results)
+            if sent_results:
+                await self._remember_batch_success(
+                    event,
+                    sent_results,
+                    prompt=prompt,
+                    mode=resolved_mode,
+                    count=success_count,
+                )
                 await mark_success(event)
             else:
                 await self._signal_llm_tool_failure(event)
@@ -3615,10 +3714,10 @@ class GiteeAIImagePlugin(Star):
                         "task_id": task_id,
                         "task_kind": "single",
                         "state": stored.get("state", "queued"),
-                        "mode": stored.get("mode", job.mode),
-                        "effective_prompt": stored.get(
-                            "effective_prompt", job.effective_prompt
+                        "mode": self._normalize_image_history_mode(
+                            stored.get("mode", job.mode)
                         ),
+                        "prompt": self._truncate_text(prompt, limit=180),
                         "message": (
                             "The image task is running in the background. Tell the "
                             "user it is underway and they can continue chatting."
@@ -3899,6 +3998,7 @@ class GiteeAIImagePlugin(Star):
                 {"items": items, "planned_count": len(items)},
             )
             generated: dict[str, tuple[Path, dict[str, Any]]] = {}
+            last_delivery_event: AstrMessageEvent | None = None
             child_limit = asyncio.Semaphore(
                 self._get_batch_concurrency_for_mode(job.mode)
             )
@@ -3985,6 +4085,7 @@ class GiteeAIImagePlugin(Star):
                 )
                 self._remember_last_image(event, image_path)
                 await self._save_last_image_task_meta(event, task_meta)
+                last_delivery_event = event
                 await manager.update_item(
                     task_id,
                     item_id,
@@ -4022,6 +4123,20 @@ class GiteeAIImagePlugin(Star):
                 },
                 queue_notification=True,
             )
+            if sent and last_delivery_event is not None:
+                await self._append_image_history_note(
+                    last_delivery_event,
+                    prompt=current.get("user_prompt"),
+                    mode=current.get("mode"),
+                    count=sent,
+                    dedupe_key=self._image_history_dedupe_key(
+                        last_delivery_event,
+                        prompt=current.get("user_prompt"),
+                        mode=current.get("mode"),
+                        count=sent,
+                        task_id=task_id,
+                    ),
+                )
             await self._dispatch_background_completion(manager, record, target)
         except asyncio.CancelledError:
             for child in children:
@@ -4225,6 +4340,17 @@ class GiteeAIImagePlugin(Star):
             )
             self._remember_last_image(delivery_event, image_path)
             await self._save_last_image_task_meta(delivery_event, task_meta)
+            await self._append_image_history_note(
+                delivery_event,
+                prompt=task_meta.get("user_prompt"),
+                mode=task_meta.get("mode"),
+                dedupe_key=self._image_history_dedupe_key(
+                    delivery_event,
+                    prompt=task_meta.get("user_prompt"),
+                    mode=task_meta.get("mode"),
+                    task_id=task_id,
+                ),
+            )
             record = await manager.transition(
                 task_id,
                 "completed",
@@ -4801,12 +4927,34 @@ class GiteeAIImagePlugin(Star):
         self,
         event: AstrMessageEvent,
         results: list[BatchRunResult[ExecutedImageTask]],
+        *,
+        prompt: str | None = None,
+        mode: str | None = None,
+        count: int | None = None,
     ) -> None:
         for result in reversed(results):
             if not result.success or result.value is None:
                 continue
             self._remember_last_image(event, result.value.image_path)
             await self._save_last_image_task_meta(event, result.value.task_meta)
+            resolved_prompt = (
+                prompt
+                if prompt is not None
+                else result.value.task_meta.get("user_prompt")
+            )
+            resolved_mode = mode or result.value.task_meta.get("mode")
+            await self._append_image_history_note(
+                event,
+                prompt=resolved_prompt,
+                mode=resolved_mode,
+                count=max(1, int(count or 1)),
+                dedupe_key=self._image_history_dedupe_key(
+                    event,
+                    prompt=resolved_prompt,
+                    mode=resolved_mode,
+                    count=max(1, int(count or 1)),
+                ),
+            )
             return
 
     async def _send_batch_results_single(
@@ -4815,10 +4963,15 @@ class GiteeAIImagePlugin(Star):
         results: list[BatchRunResult[ExecutedImageTask]],
         *,
         title: str,
-    ) -> None:
+    ) -> list[BatchRunResult[ExecutedImageTask]]:
+        sent_results: list[BatchRunResult[ExecutedImageTask]] = []
         for result in results:
-            if result.success and result.value is not None:
-                await self._send_image_with_fallback(event, result.value.image_path)
+            if not result.success or result.value is None:
+                continue
+            sent = await self._send_image_with_fallback(event, result.value.image_path)
+            if sent:
+                sent_results.append(result)
+        return sent_results
 
     async def _send_batch_results(
         self,
@@ -4826,8 +4979,8 @@ class GiteeAIImagePlugin(Star):
         results: list[BatchRunResult[ExecutedImageTask]],
         *,
         title: str,
-    ) -> None:
-        await self._send_batch_results_single(event, results, title=title)
+    ) -> list[BatchRunResult[ExecutedImageTask]]:
+        return await self._send_batch_results_single(event, results, title=title)
 
     async def _plan_batch_prompt_items(
         self,
@@ -5094,10 +5247,12 @@ class GiteeAIImagePlugin(Star):
             return
 
         p = (prompt or "").strip()
+        history_prompt = p or str(preset or "").strip()
         override, rest = self._parse_provider_override_prefix(p)
         if override:
             backend = override
             prompt = rest
+            history_prompt = str(prompt or "").strip()
 
         # 获取图片
         image_segs = await get_images_from_event(
@@ -5154,6 +5309,11 @@ class GiteeAIImagePlugin(Star):
 
             # 标记成功
             await mark_success(event)
+            await self._append_image_history_note(
+                event,
+                prompt=history_prompt,
+                mode="edit",
+            )
             display_name = preset or (prompt[:20] if prompt else "改图")
             logger.info(f"[改图] 完成: {display_name}..., 耗时={t_end - t_start:.2f}s")
 
@@ -5185,12 +5345,13 @@ class GiteeAIImagePlugin(Star):
             await mark_failed(event)
             return
 
-        # Optional provider override: "/aiedit @provider_id <prompt>"
         p = (prompt or "").strip()
+        history_prompt = p or str(preset or "").strip()
         override, rest = self._parse_provider_override_prefix(p)
         if override:
             backend = override
             prompt = rest
+            history_prompt = str(prompt or "").strip()
 
         # 预设自动检测: prompt 完全匹配预设名时，自动转为预设
         if not preset and prompt:
@@ -5198,7 +5359,7 @@ class GiteeAIImagePlugin(Star):
             preset_names = self.edit.get_preset_names()
             if prompt_stripped in preset_names:
                 preset = prompt_stripped
-                prompt = ""  # 清空 prompt，使用预设的提示词
+                prompt = ""
                 logger.debug(f"[改图] 自动匹配预设: {preset}")
 
         # 获取图片
@@ -5251,6 +5412,11 @@ class GiteeAIImagePlugin(Star):
 
             # 标记成功
             await mark_success(event)
+            await self._append_image_history_note(
+                event,
+                prompt=history_prompt,
+                mode="edit",
+            )
             display_name = preset or (prompt[:20] if prompt else "改图")
             logger.info(f"[改图] 完成: {display_name}..., 耗时={t_end - t_start:.2f}s")
 
@@ -5323,6 +5489,16 @@ class GiteeAIImagePlugin(Star):
 
         await mark_success(event)
         await self._save_last_image_task_meta(event, task_meta)
+        await self._append_image_history_note(
+            event,
+            prompt=task_meta.get("user_prompt"),
+            mode=task_meta.get("mode"),
+            dedupe_key=self._image_history_dedupe_key(
+                event,
+                prompt=task_meta.get("user_prompt"),
+                mode=task_meta.get("mode"),
+            ),
+        )
         return self._build_image_task_completion_result(task_meta)
 
     def _get_selfie_ref_store_key(self, event: AstrMessageEvent) -> str:
@@ -5706,7 +5882,6 @@ class GiteeAIImagePlugin(Star):
         if override:
             backend = override
             prompt = rest
-
         try:
             await mark_processing(event)
             image_path, task_meta = await self._generate_selfie_image_with_meta(
@@ -5723,6 +5898,11 @@ class GiteeAIImagePlugin(Star):
                 return
             await mark_success(event)
             await self._save_last_image_task_meta(event, task_meta)
+            await self._append_image_history_note(
+                event,
+                prompt=task_meta.get("user_prompt"),
+                mode=task_meta.get("mode"),
+            )
         except Exception as e:
             logger.error(f"[自拍] 失败: {e}", exc_info=True)
             await mark_failed(event)

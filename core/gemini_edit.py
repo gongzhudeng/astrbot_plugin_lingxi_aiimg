@@ -169,13 +169,7 @@ class GeminiEditBackend:
         seen: set[str] = set()
 
         def push(url: str):
-            u = (
-                str(url)
-                .strip()
-                .replace("&amp;", "&")
-                .strip("'\"")
-                .rstrip(").,;")
-            )
+            u = str(url).strip().replace("&amp;", "&").strip("'\"").rstrip(").,;")
             if not u:
                 return
             if u in seen:
@@ -215,13 +209,7 @@ class GeminiEditBackend:
         )
 
         def push(url: str):
-            u = (
-                str(url)
-                .strip()
-                .replace("&amp;", "&")
-                .strip("'\"")
-                .rstrip(").,;")
-            )
+            u = str(url).strip().replace("&amp;", "&").strip("'\"").rstrip(").,;")
             if not (u.startswith("http://") or u.startswith("https://")):
                 return
             if u in seen:
