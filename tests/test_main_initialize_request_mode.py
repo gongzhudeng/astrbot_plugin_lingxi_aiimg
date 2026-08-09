@@ -832,7 +832,7 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_metadata_version_is_current(self):
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-        self.assertIn("version: 1.2.2", metadata)
+        self.assertIn("version: 1.2.3", metadata)
 
     def test_selfie_prompt_describes_fixed_and_user_reference_ranges(self):
         mod, _ = _load_module()

@@ -2715,7 +2715,7 @@ class GiteeAIImagePlugin(Star):
             mode(string): text=普通文生图，edit=直接修改原图，selfie_ref=固定人物参考图。
             backend(string): auto=使用配置的服务商链；也可指定 provider_id。
             output(string): 可选输出尺寸或分辨率，例如 2048x2048 或 4K。
-            count(number): 生成数量，默认 1；用户明确要求多张或一组图片时设置为 2 至配置上限。
+            count(number): 默认只能生成 1 张；只有用户明确说“生很多张”等批量要求时，才能设置为 2 至配置上限，不要自行开启批量。
         """
         get_extra = getattr(event, "get_extra", None)
         if callable(get_extra) and get_extra(_BACKGROUND_COMPLETION_EVENT_EXTRA, False):
