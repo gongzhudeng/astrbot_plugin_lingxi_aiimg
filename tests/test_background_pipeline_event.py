@@ -302,6 +302,50 @@ async def test_background_status_is_appended_as_temporary_user_part(tmp_path):
     assert "original prompt" in req.extra_user_content_parts[0].text
 
 
+@pytest.mark.asyncio
+async def test_background_completion_uses_history_placeholder_and_temp_instruction(
+    tmp_path,
+):
+    mod, _ = _load_module()
+    manager = types.SimpleNamespace(
+        scope_hash=lambda *args: "scope",
+        get_task=lambda task_id: _async_value(
+            {
+                "task_id": task_id,
+                "task_kind": "single",
+                "state": "completed",
+                "mode": "selfie_ref",
+                "user_prompt": "bedroom selfie",
+                "image_sent": True,
+                "delivery_state": "confirmed",
+            }
+        ),
+    )
+    plugin = _plugin(mod, manager)
+    event = _Event()
+    event.set_extra(mod._BACKGROUND_COMPLETION_EVENT_EXTRA, True)
+    event.set_extra("_gitee_bg_task_id", "task-1")
+    req = types.SimpleNamespace(
+        prompt=mod._BACKGROUND_COMPLETION_HISTORY_PLACEHOLDER,
+        system_prompt="stable system",
+        extra_user_content_parts=[],
+        func_tool=types.SimpleNamespace(tools=[]),
+        conversation=types.SimpleNamespace(cid="conversation"),
+    )
+
+    await plugin.inject_background_image_tasks(event, req)
+
+    assert req.prompt == mod._BACKGROUND_COMPLETION_HISTORY_PLACEHOLDER
+    assert "internal completion notice" not in req.prompt
+    assert req.system_prompt == "stable system"
+    assert len(req.extra_user_content_parts) == 2
+    assert "bedroom selfie" in req.extra_user_content_parts[0].text
+    assert (
+        "internal background image completion event"
+        in req.extra_user_content_parts[1].text
+    )
+
+
 async def _async_value(value):
     return value
 
@@ -397,6 +441,9 @@ async def test_same_umo_terminal_notifications_wait_for_send_confirmation(tmp_pa
     assert first_event.get_extra(mod._BACKGROUND_COMPLETION_EVENT_EXTRA) is True
     assert first_event.get_extra("provider_request") is None
     first_request = first_event.get_extra(mod._BACKGROUND_COMPLETION_REQUEST_EXTRA)
+    assert first_request.prompt == mod._BACKGROUND_COMPLETION_HISTORY_PLACEHOLDER
+    assert "internal completion notice" not in first_request.prompt
+    assert first_request.conversation.cid == "conversation"
     assert [tool.name for tool in first_request.func_tool.tools] == [
         "aiimg_generate",
         "search",

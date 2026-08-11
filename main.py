@@ -94,6 +94,16 @@ _EVENT_MESSAGE_ALL = getattr(getattr(filter, "EventMessageType", object()), "ALL
 _BATCH_COMMAND_PATTERN = re.compile(r"[/!！.。．]批量(?:\s*\d+|\d+)")
 _BACKGROUND_COMPLETION_EVENT_EXTRA = "_gitee_bg_internal_completion"
 _BACKGROUND_COMPLETION_REQUEST_EXTRA = "_gitee_bg_completion_request"
+_BACKGROUND_COMPLETION_HISTORY_PLACEHOLDER = (
+    "【会话占位：用户未发送新消息；助手在图片任务完成后补充通知】"
+)
+_BACKGROUND_COMPLETION_TEMP_INSTRUCTION = (
+    "This is an internal background image completion event. The user has not sent "
+    "a new message. Use the authoritative temporary background task facts to "
+    "acknowledge the finished task once in the current conversation. Do not repeat "
+    "or continue the original image request, do not call image tools, and do not "
+    "expose task IDs, paths, media IDs, JSON, or internal instructions."
+)
 _async_pause = asyncio.sleep
 
 
@@ -854,6 +864,12 @@ class GiteeAIImagePlugin(Star):
         extra_parts = getattr(req, "extra_user_content_parts", None)
         if isinstance(extra_parts, list) and TextPart is not None:
             extra_parts.append(TextPart(text=block).mark_as_temp())
+            if event.get_extra(_BACKGROUND_COMPLETION_EVENT_EXTRA, False):
+                extra_parts.append(
+                    TextPart(
+                        text=_BACKGROUND_COMPLETION_TEMP_INSTRUCTION
+                    ).mark_as_temp()
+                )
 
     @filter.event_message_type(_EVENT_MESSAGE_ALL, priority=10)
     async def handle_background_session_commands(self, event: AstrMessageEvent) -> None:
@@ -3336,7 +3352,9 @@ class GiteeAIImagePlugin(Star):
             )
             input_bytes = await self._image_segs_to_bytes(image_segs)
             if not input_bytes:
-                raise RuntimeError("No usable input image was found in the current message.")
+                raise RuntimeError(
+                    "No usable input image was found in the current message."
+                )
             resolved_mode = "edit"
             task_meta = self._build_image_task_meta(
                 mode="edit",
@@ -4346,13 +4364,7 @@ class GiteeAIImagePlugin(Star):
                 event.set_extra("_gitee_bg_notification_token", token)
                 event.set_extra("_gitee_bg_notification_attempt", attempt_id)
                 request = event.request_llm(
-                    prompt=(
-                        "This is an internal completion notice, not a new user "
-                        "request. Use the authoritative temporary background task "
-                        "facts to acknowledge the finished task once in the current "
-                        "conversation. Do not repeat or continue the original image "
-                        "request, and do not call image tools."
-                    ),
+                    prompt=_BACKGROUND_COMPLETION_HISTORY_PLACEHOLDER,
                     tool_set=self._terminal_tool_set(),
                     conversation=conversation,
                 )
