@@ -672,6 +672,125 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_aiimg_generate_defaults_and_auto_fail_without_selfie_reference(self):
+        mod, _ = _load_module()
+        plugin = mod.GiteeAIImagePlugin(
+            context=types.SimpleNamespace(),
+            config={
+                "features": {
+                    "selfie": {"enabled": True, "llm_tool_enabled": True},
+                    "draw": {"enabled": True, "llm_tool_enabled": True},
+                }
+            },
+        )
+        plugin.registry = types.SimpleNamespace(provider_ids=lambda: [])
+        plugin.debouncer = types.SimpleNamespace(
+            llm_tool_is_duplicate=lambda *args: False,
+            hit=lambda *args: False,
+        )
+        plugin._debounce_key = lambda *args: "image-request"
+        failures = []
+        selfie_attempts = []
+
+        async def begin(*args, **kwargs):
+            return True
+
+        async def end(*args, **kwargs):
+            return None
+
+        async def processing(event):
+            return None
+
+        async def signal_failure(event):
+            failures.append(event)
+
+        async def missing_reference(event, prompt, backend, **kwargs):
+            selfie_attempts.append((prompt, backend))
+            raise RuntimeError("未设置自拍参考照")
+
+        plugin._begin_user_job = begin
+        plugin._end_user_job = end
+        plugin._signal_llm_tool_failure = signal_failure
+        plugin._generate_selfie_image_with_meta = missing_reference
+        plugin.draw = types.SimpleNamespace(
+            generate=lambda *args, **kwargs: self.fail("默认自拍不能降级到文生图")
+        )
+        mod.mark_processing = processing
+        event = types.SimpleNamespace(get_sender_id=lambda: "user")
+
+        default_result = await plugin.aiimg_generate(event, "窗边肖像")
+        auto_result = await plugin.aiimg_generate(event, "窗边肖像", mode="auto")
+
+        self.assertEqual(len(selfie_attempts), 2)
+        self.assertEqual(len(failures), 2)
+        self.assertIn("自拍参考照缺失", default_result.content[0].text)
+        self.assertIn("自拍参考照缺失", auto_result.content[0].text)
+        self.assertNotIn("RuntimeError", default_result.content[0].text)
+
+    async def test_aiimg_generate_explicit_text_respects_llm_draw_switch(self):
+        mod, _ = _load_module()
+        plugin = mod.GiteeAIImagePlugin(
+            context=types.SimpleNamespace(),
+            config={"features": {"draw": {"enabled": True, "llm_tool_enabled": False}}},
+        )
+        plugin.registry = types.SimpleNamespace(provider_ids=lambda: [])
+        plugin.debouncer = types.SimpleNamespace(
+            llm_tool_is_duplicate=lambda *args: False,
+            hit=lambda *args: False,
+        )
+        plugin._debounce_key = lambda *args: "image-request"
+        generated = []
+        failures = []
+
+        async def begin(*args, **kwargs):
+            return True
+
+        async def end(*args, **kwargs):
+            return None
+
+        async def processing(event):
+            return None
+
+        async def signal_failure(event):
+            failures.append(event)
+
+        async def generate(*args, **kwargs):
+            generated.append((args, kwargs))
+            raise AssertionError("禁用时不应调用文生图服务")
+
+        plugin._begin_user_job = begin
+        plugin._end_user_job = end
+        plugin._signal_llm_tool_failure = signal_failure
+        plugin.draw = types.SimpleNamespace(generate=generate)
+        mod.mark_processing = processing
+        event = types.SimpleNamespace(get_sender_id=lambda: "user")
+
+        result = await plugin.aiimg_generate(event, "一座山", mode="text")
+
+        self.assertEqual(generated, [])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("disabled", result.content[0].text)
+
+    async def test_aiimg_generate_routes_explicit_edit_to_single_task(self):
+        mod, _ = _load_module()
+        plugin = mod.GiteeAIImagePlugin(
+            context=types.SimpleNamespace(),
+            config={"features": {"batch": {"max_count": 8}}},
+        )
+        calls = []
+
+        async def fake_single(event, **kwargs):
+            calls.append(kwargs)
+            return "single-result"
+
+        plugin._aiimg_generate_single = fake_single
+        event = object()
+
+        result = await plugin.aiimg_generate(event, "移除背景", mode="edit")
+
+        self.assertEqual(result, "single-result")
+        self.assertEqual(calls[0]["mode"], "edit")
+
     async def test_aiimg_generate_routes_explicit_count_to_one_batch(self):
         mod, _ = _load_module()
         plugin = mod.GiteeAIImagePlugin(
@@ -719,6 +838,25 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_llm_mode_normalization_defaults_auto_to_selfie_ref(self):
+        mod, _ = _load_module()
+        normalize = mod.GiteeAIImagePlugin._normalize_llm_image_mode
+
+        self.assertEqual(normalize(None), "selfie_ref")
+        self.assertEqual(normalize(""), "selfie_ref")
+        self.assertEqual(normalize("auto"), "selfie_ref")
+        self.assertEqual(normalize("selfie_ref"), "selfie_ref")
+        self.assertEqual(normalize("text"), "text")
+        self.assertEqual(normalize("edit"), "edit")
+
+    def test_llm_batch_mode_keeps_text_and_edit_explicit(self):
+        mod, _ = _load_module()
+        plugin = object.__new__(mod.GiteeAIImagePlugin)
+
+        self.assertEqual(plugin._resolve_llm_batch_mode("auto"), "selfie_ref")
+        self.assertEqual(plugin._resolve_llm_batch_mode("text"), "draw")
+        self.assertEqual(plugin._resolve_llm_batch_mode("edit"), "edit")
+
     def test_aiimg_count_validation_rejects_invalid_or_excess_values(self):
         mod, _ = _load_module()
         plugin = mod.GiteeAIImagePlugin(
@@ -764,24 +902,43 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(image_tools, ["aiimg_generate"])
 
-    def test_image_history_note_contains_only_original_prompt_and_normalized_mode(self):
+    def test_image_history_note_contains_only_original_prompt_and_boundary(self):
         mod, _ = _load_module()
         plugin = object.__new__(mod.GiteeAIImagePlugin)
 
-        for raw_mode, mode in (
-            ("text", "text"),
-            ("edit", "edit"),
-            ("selfie", "selfie_ref"),
-        ):
+        for raw_mode in ("text", "edit", "selfie"):
             note = plugin._build_image_history_note(
                 prompt="user prompt",
                 mode=raw_mode,
             )
-            self.assertIn(f"Mode: {mode}", note)
-            self.assertIn("Prompt: user prompt", note)
+            self.assertIn("<image_history_record>", note)
+            self.assertIn("主体描述：user prompt", note)
+            self.assertIn("真实调用 aiimg_generate", note)
             self.assertNotIn("effective_prompt", note)
             self.assertNotIn("internal rule", note)
             self.assertNotIn("prompt prefix", note)
+            self.assertNotIn("Mode:", note)
+            self.assertNotIn("Prompt:", note)
+
+        prefixed_note = plugin._build_image_history_note(
+            prompt="/自拍: 窗边肖像",
+            mode="selfie_ref",
+        )
+        self.assertIn("主体描述：窗边肖像", prefixed_note)
+        self.assertNotIn("/自拍", prefixed_note)
+
+    def test_image_history_for_spec_excludes_preset_and_effective_prompt(self):
+        mod, _ = _load_module()
+        spec = types.SimpleNamespace(
+            user_prompt="主体描述",
+            preset_name="不应保存的预设名",
+            effective_prompt="不应保存的拼接提示词",
+        )
+
+        self.assertEqual(
+            mod.GiteeAIImagePlugin._image_history_prompt_for_spec(spec),
+            "主体描述",
+        )
 
     async def test_image_history_persists_one_assistant_note_and_is_idempotent(self):
         mod, _ = _load_module()
@@ -824,15 +981,16 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         history = json.loads(conversation.history)
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["role"], "assistant")
-        self.assertIn("Mode: selfie_ref", history[0]["content"])
-        self.assertIn("Prompt: original prompt", history[0]["content"])
+        self.assertIn("<image_history_record>", history[0]["content"])
+        self.assertIn("主体描述：original prompt", history[0]["content"])
+        self.assertIn("真实调用 aiimg_generate", history[0]["content"])
         self.assertNotIn("effective_prompt", history[0]["content"])
         self.assertNotIn("reference_source", history[0]["content"])
         self.assertNotIn("media_id", history[0]["content"])
 
     def test_metadata_version_is_current(self):
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-        self.assertIn("version: 1.2.3", metadata)
+        self.assertIn("version: 1.2.4", metadata)
 
     def test_selfie_prompt_describes_fixed_and_user_reference_ranges(self):
         mod, _ = _load_module()

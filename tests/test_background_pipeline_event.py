@@ -1,5 +1,4 @@
 import asyncio
-import json
 import types
 from pathlib import Path
 
@@ -236,17 +235,16 @@ async def test_single_tool_returns_before_provider_finishes(tmp_path):
         backend="auto",
         output="",
     )
-    payload = json.loads(result.content[0].text)
 
-    assert payload["status"] == "accepted"
-    assert payload["prompt"] == "take a portrait"
-    assert "effective_prompt" not in payload
+    assert result is None
+    task_id = event.get_extra("_gitee_bg_ack_task_id")
+    assert task_id
     await asyncio.wait_for(provider_started.wait(), timeout=1)
-    record = await manager.get_task(payload["task_id"])
+    record = await manager.get_task(task_id)
     assert record["state"] == "running"
     assert not provider_release.is_set()
 
-    await manager.cancel_task(payload["task_id"], "test cleanup")
+    await manager.cancel_task(task_id, "test cleanup")
     await manager.close()
 
 
@@ -625,15 +623,14 @@ async def test_batch_tool_returns_while_planner_is_still_running(tmp_path):
         backend="auto",
         output="",
     )
-    payload = json.loads(result.content[0].text)
 
-    assert payload["status"] == "accepted"
-    assert payload["state"] == "planning"
-    assert payload["requested_count"] == 4
+    assert result is None
+    task_id = event.get_extra("_gitee_bg_ack_task_id")
+    assert task_id
     await asyncio.wait_for(planner_started.wait(), timeout=1)
-    record = await manager.get_task(payload["task_id"])
+    record = await manager.get_task(task_id)
     assert record["state"] == "planning"
     assert not planner_release.is_set()
 
-    await manager.cancel_task(payload["task_id"], "test cleanup")
+    await manager.cancel_task(task_id, "test cleanup")
     await manager.close()
