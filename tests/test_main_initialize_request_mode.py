@@ -990,7 +990,18 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_metadata_version_is_current(self):
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-        self.assertIn("version: 1.2.4", metadata)
+        self.assertIn("version: 1.2.7", metadata)
+
+    def test_aiimg_tool_description_enforces_image_mode_rules(self):
+        mod, _ = _load_module()
+        description = mod.GiteeAIImagePlugin.aiimg_generate.__doc__ or ""
+
+        self.assertIn("编辑模式（edit）：禁止自行使用", description)
+        self.assertIn("没有可编辑图片时，不得使用编辑模式", description)
+        self.assertIn("自拍模式不局限于露脸自拍", description)
+        self.assertIn("第一人称视角", description)
+        self.assertIn("文生图模式（text）：不允许自行使用", description)
+        self.assertIn("提示词不能写得过度暴露或违规", description)
 
     def test_selfie_prompt_describes_fixed_and_user_reference_ranges(self):
         mod, _ = _load_module()
