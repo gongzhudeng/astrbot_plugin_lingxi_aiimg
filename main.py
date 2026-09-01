@@ -3260,6 +3260,7 @@ class GiteeAIImagePlugin(Star):
             effective_user_prompt,
             reference_count=len(ref_images),
             extra_reference_count=len(extra_bytes),
+            control_text=str(getattr(event, "message_str", "") or ""),
         )
 
         chain_override: list[dict] | None = None
@@ -3631,6 +3632,7 @@ class GiteeAIImagePlugin(Star):
                 extra_reference_count=int(
                     job.options.get("extra_reference_count") or 0
                 ),
+                control_text=str(getattr(event, "message_str", "") or ""),
             )
             task_meta = self._build_image_task_meta(
                 mode="selfie_ref",
@@ -5348,12 +5350,104 @@ class GiteeAIImagePlugin(Star):
             .replace("{weekday}", _weekday_names[now.weekday()])
         )
 
+    @staticmethod
+    def _split_config_keywords(value: Any, defaults: tuple[str, ...]) -> tuple[str, ...]:
+        raw = value if isinstance(value, (list, tuple)) else []
+        result = tuple(str(item).strip().casefold() for item in raw if str(item).strip())
+        return result or defaults
+
+    @staticmethod
+    def _contains_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+        folded = str(text or "").casefold()
+        return any(keyword and keyword in folded for keyword in keywords)
+
+    @staticmethod
+    def _strip_outfit_underwear(outfit: str) -> str:
+        hidden_labels = ("内衣", "内裤", "文胸", "胸罩", "bra", "panties", "underwear", "lingerie")
+        kept = []
+        for line in str(outfit or "").splitlines():
+            if any(label in line.casefold() for label in hidden_labels):
+                continue
+            if line.strip():
+                kept.append(line.strip())
+        return "\n".join(kept)
+
+    def _get_busy_schedule_outfit(self) -> str:
+        getter = getattr(self.context, "_busy_schedule_get_facts", None)
+        if callable(getter):
+            try:
+                facts = getter()
+                if isinstance(facts, dict):
+                    outfit = str(facts.get("outfit") or "").strip()
+                    if outfit:
+                        return self._strip_outfit_underwear(outfit)
+            except Exception:
+                pass
+        return self._strip_outfit_underwear(
+            str(getattr(self.context, "_busy_schedule_outfit", "") or "").strip()
+        )
+
+    def _resolve_lighting_placeholder(self) -> str:
+        from datetime import datetime
+        conf = self._get_selfie_conf()
+        now = datetime.now()
+        now_minutes = now.hour * 60 + now.minute
+        rules = conf.get("lighting_rules", [])
+        if isinstance(rules, list):
+            for item in rules:
+                text = str(item or "").strip()
+                if "=" not in text or "-" not in text:
+                    continue
+                span, value = text.split("=", 1)
+                try:
+                    start_text, end_text = span.strip().split("-", 1)
+                    sh, sm = (int(part) for part in start_text.split(":", 1))
+                    eh, em = (int(part) for part in end_text.split(":", 1))
+                    start, end = sh * 60 + sm, eh * 60 + em
+                except (ValueError, TypeError):
+                    continue
+                if not (0 <= start < 1440 and 0 <= end <= 1440 and value.strip()):
+                    continue
+                if end == 1440:
+                    matched = now_minutes >= start
+                else:
+                    matched = start <= now_minutes < end if start < end else now_minutes >= start or now_minutes < end
+                if matched:
+                    return value.strip()
+        if 5 * 60 <= now_minutes < 7 * 60:
+            return "黎明、日出前后柔和的金色自然光"
+        if 7 * 60 <= now_minutes < 17 * 60:
+            return "日间自然光"
+        if 17 * 60 <= now_minutes < 19 * 60:
+            return "黄昏、日落前后柔和的金色自然光"
+        return "夜间环境、室内人造灯光"
+
+    def _prepare_selfie_prompt_context(
+        self, prompt: str, control_text: str = ""
+    ) -> tuple[str, str]:
+        conf = self._get_selfie_conf()
+        current = str(prompt or "").strip()
+        force = self._split_config_keywords(conf.get("outfit_force_keywords"), ("沿用今日穿搭", "沿用今天的穿搭", "强制使用今日穿搭", "强制使用今天的穿搭"))
+        skip = self._split_config_keywords(conf.get("outfit_skip_keywords"), ("不要使用今日穿搭", "不要使用今天的穿搭", "不使用今日穿搭", "不使用今天的穿搭"))
+        auto = self._split_config_keywords(conf.get("outfit_auto_keywords"), ("裙子", "短裙", "长裙", "半身裙", "连衣裙", "裤子", "短裤", "长裤", "牛仔裤", "上衣", "外套", "衬衫", "针织衫", "卫衣", "夹克", "袜子", "鞋子", "靴子", "帽子", "围巾", "配饰", "服装", "衣服", "换装", "穿搭", "outfit", "dress", "skirt", "pants", "shirt", "jacket"))
+        use_outfit = bool(conf.get("today_outfit_enabled", True))
+        explicit_source = f"{control_text}\n{current}"
+        if self._contains_keyword(explicit_source, force):
+            use_outfit = True
+        elif self._contains_keyword(explicit_source, skip) or self._contains_keyword(current, auto):
+            use_outfit = False
+        cleaned = current
+        for control in tuple(dict.fromkeys((*force, *skip))):
+            cleaned = re.sub(re.escape(control), "", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip(" ，,。.!！\n\t"), "" if not use_outfit else self._get_busy_schedule_outfit()
+
     def _build_selfie_prompt(
         self,
         prompt: str,
         *,
         reference_count: int,
         extra_reference_count: int,
+        control_text: str = "",
     ) -> str:
         conf = self._get_selfie_conf()
         prefix = str(conf.get("prompt_prefix", "") or "").strip()
@@ -5362,13 +5456,23 @@ class GiteeAIImagePlugin(Star):
                 "请根据参考图生成一张新的自拍照：\n"
                 "1) 以固定人物参考图的人脸身份为准，保持五官和气质一致。\n"
                 "2) 本次用户参考图仅用于用户指定的服装、姿势、构图或场景。\n"
-                "3) 输出一张高质量照片风格自拍，不要拼图，不要水印。"
+                "3) 输出一张高质量照片风格自拍，不要拼图，不要水印。\n"
+                "今日外显穿搭：{today_outfit}\n"
+                "当前时间光线：{lighting}"
             )
 
+        user_prompt, outfit = self._prepare_selfie_prompt_context(prompt, control_text)
+        has_outfit_placeholder = "{today_outfit}" in prefix
+        has_lighting_placeholder = "{lighting}" in prefix
+        prefix = prefix.replace("{today_outfit}", outfit)
+        lighting = self._resolve_lighting_placeholder()
+        prefix = prefix.replace("{lighting}", lighting)
+        if outfit and not has_outfit_placeholder:
+            prefix = f"{prefix}\n今日外显穿搭：{outfit}"
+        if not has_lighting_placeholder:
+            prefix = f"{prefix}\n当前时间光线：{lighting}"
         prefix = self._expand_time_placeholders(prefix)
-        user_prompt = self._expand_time_placeholders(
-            (prompt or "").strip() or "日常自拍照"
-        )
+        user_prompt = self._expand_time_placeholders(user_prompt or "日常自拍照")
         reference_count = max(0, int(reference_count or 0))
         extra_reference_count = max(0, int(extra_reference_count or 0))
         if extra_reference_count > 0:
@@ -5385,7 +5489,9 @@ class GiteeAIImagePlugin(Star):
             )
         else:
             reference_note = f"图片顺序：第 1-{reference_count} 张均为固定人物参考图。"
-        return f"{prefix}\n\n{reference_note}\n\n用户要求：{user_prompt}"
+        prefix = "\n".join(line.rstrip() for line in prefix.splitlines()).strip()
+        sections = [part for part in (prefix, reference_note, f"用户要求：{user_prompt}") if part]
+        return "\n\n".join(sections)
 
     def _merge_selfie_chain_with_edit_chain(
         self, selfie_chain: list[object]
@@ -5449,6 +5555,7 @@ class GiteeAIImagePlugin(Star):
             effective_user_prompt,
             reference_count=len(ref_images),
             extra_reference_count=len(extra_bytes),
+            control_text=str(getattr(event, "message_str", "") or ""),
         )
 
         chain_override: list[dict] | None = None

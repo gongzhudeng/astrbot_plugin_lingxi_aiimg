@@ -1,6 +1,6 @@
 # 灵犀 · AI生图
 
-[![Plugin Version](https://img.shields.io/badge/Version-1.2.8-4f8cc9?style=for-the-badge)](./CHANGELOG.md)
+[![Plugin Version](https://img.shields.io/badge/Version-1.3.0-4f8cc9?style=for-the-badge)](./CHANGELOG.md)
 [![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.16.0%2C%20%3C5-ff69b4?style=for-the-badge)](https://github.com/AstrBotDevs/AstrBot)
 [![Platform](https://img.shields.io/badge/Primary-aiocqhttp-4caf50?style=for-the-badge)](#平台与限制)
 

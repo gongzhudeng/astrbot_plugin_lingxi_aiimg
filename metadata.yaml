@@ -2,7 +2,7 @@ name: astrbot_plugin_gitee_aiimg
 display_name: 灵犀 · AI生图
 desc: >
   灵犀 AI 生图插件：支持多服务商文生图、改图、自拍参考照、视频生成、预设提示词、批量出图、LLM 批量调用、多 Key 轮询、失败兜底与超时配置。基于原 AstrBot Gitee AI 图像生成插件改造，感谢原作者木有知、Zhalslar 的开源贡献。
-version: 1.2.8
+version: 1.3.0
 author: 灵犀
 astrbot_version: ">=4.16.0,<5"
 support_platforms:

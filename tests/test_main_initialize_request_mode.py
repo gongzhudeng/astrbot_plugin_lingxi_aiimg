@@ -990,7 +990,7 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_metadata_version_is_current(self):
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-        self.assertIn("version: 1.2.8", metadata)
+        self.assertIn("version: 1.3.0", metadata)
 
     def test_aiimg_tool_description_enforces_image_mode_rules(self):
         mod, _ = _load_module()
@@ -1023,6 +1023,29 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("第 5-6 张是本次用户附带或引用的参考图", prompt)
         self.assertIn("用户参考图不是待修改原图", prompt)
         self.assertIn("用户要求：参考衣服和姿势", prompt)
+
+    def test_selfie_prompt_injects_sanitized_busy_schedule_outfit_and_lighting(self):
+        mod, _ = _load_module()
+        context = types.SimpleNamespace(_busy_schedule_outfit="内衣：黑色\n内裤：黑色\n上装：白色衬衫\n下装：蓝色短裙")
+        plugin = mod.GiteeAIImagePlugin(context=context, config={"features": {"selfie": {"prompt_prefix": "{today_outfit} | {lighting}", "lighting_rules": ["00:00-24:00=测试光线"]}}})
+        prompt = plugin._build_selfie_prompt("窗边自拍", reference_count=1, extra_reference_count=0)
+        self.assertIn("白色衬衫", prompt)
+        self.assertIn("蓝色短裙", prompt)
+        self.assertNotIn("内衣", prompt)
+        self.assertNotIn("内裤", prompt)
+        self.assertIn("测试光线", prompt)
+
+    def test_selfie_prompt_skips_outfit_for_temporary_clothing_and_force_overrides(self):
+        mod, _ = _load_module()
+        context = types.SimpleNamespace(_busy_schedule_outfit="上装：白衬衫")
+        config = {"features": {"selfie": {"prompt_prefix": "穿搭：{today_outfit}", "lighting_rules": ["00:00-24:00=光线"]}}}
+        plugin = mod.GiteeAIImagePlugin(context=context, config=config)
+        temporary = plugin._build_selfie_prompt("穿黑色短裙自拍", reference_count=1, extra_reference_count=0)
+        self.assertNotIn("白衬衫", temporary)
+        self.assertIn("黑色短裙", temporary)
+        forced = plugin._build_selfie_prompt("强制使用今日穿搭，拍腿部特写", reference_count=1, extra_reference_count=0)
+        self.assertIn("白衬衫", forced)
+        self.assertNotIn("强制使用今日穿搭", forced)
 
     def test_selfie_prompt_without_user_reference_keeps_fixed_range(self):
         mod, _ = _load_module()
