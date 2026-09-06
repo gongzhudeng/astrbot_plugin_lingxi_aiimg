@@ -913,12 +913,16 @@ class GiteeAIImagePlugin(Star):
             return
         result = event.get_result()
         chain = getattr(result, "chain", None) if result is not None else None
-        has_plain = any(
-            isinstance(component, Plain)
-            and str(getattr(component, "text", "") or "").strip()
+        # Any user-visible component counts as the model having replied. Voice
+        # rounds carry a Record instead of text (TTS replaces the text in the
+        # chain), so a Plain-only check would append a duplicate caption on top
+        # of the model's own voice reply.
+        has_content = any(
+            not isinstance(component, Plain)
+            or str(getattr(component, "text", "") or "").strip()
             for component in chain or []
         )
-        if not has_plain:
+        if not has_content:
             record = await manager.get_task(completion_task_id or ack_task_id)
             if completion_task_id and record is not None:
                 text = self._background_notification_text(record)
