@@ -4307,10 +4307,14 @@ class GiteeAIImagePlugin(Star):
     ) -> None:
         await asyncio.sleep(self.BACKGROUND_NOTIFICATION_WATCHDOG_SECONDS)
         attempt_id = manager.new_task_id("notify-watchdog")
+        # Only claim "pending": a "queued" row is owned by an in-flight
+        # notification agent round that may still be generating its reply
+        # (LLM + TTS can take a while). Claiming "queued" here would send the
+        # deterministic fallback text on top of the model's own reply.
         record = await manager.claim_notification(
             token,
             attempt_id,
-            from_states=("pending", "queued"),
+            from_states=("pending",),
         )
         if record is not None:
             await self._send_deterministic_background_notification(
