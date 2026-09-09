@@ -322,12 +322,16 @@ def _load_module():
         ParsedImageRequest=_StubParsedImageRequest,
         parse_image_request=lambda *args, **kwargs: _StubParsedImageRequest(),
     )
+    async def _stub_plan_with_chain(*args, **kwargs):
+        return []
+
     _install_stub_module(
         f"{CORE_PACKAGE_NAME}.llm_batch_planner",
         PlannedPromptItem=_StubPlannedPromptItem,
         build_batch_planning_prompt=lambda *args, **kwargs: "",
         parse_planned_prompt_items=lambda *args, **kwargs: [],
         validate_planned_prompt_items=lambda *args, **kwargs: [],
+        plan_with_chain=_stub_plan_with_chain,
     )
     _install_stub_module(
         f"{CORE_PACKAGE_NAME}.image_format",
@@ -990,7 +994,7 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_metadata_version_is_current(self):
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-        self.assertIn("version: 1.3.0", metadata)
+        self.assertIn("version: 1.3.4", metadata)
 
     def test_aiimg_tool_description_enforces_image_mode_rules(self):
         mod, _ = _load_module()

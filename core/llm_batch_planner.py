@@ -1,7 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
+from typing import Any
+
+PLANNER_SYSTEM_PROMPT = (
+    "You plan image prompt sets. Output JSON only. "
+    "No markdown, no code fence, no explanation."
+)
+
+_PLANNER_HINT_BALANCE = "规划模型余额不足"
+
+
+def _friendly_planner_error(exc: Exception) -> str:
+    text = str(exc)
+    if "Insufficient Balance" in text or "402" in text:
+        return f"{_PLANNER_HINT_BALANCE}: {text}"
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"规划模型响应超时: {text}"
+    return text
 
 
 @dataclass(slots=True)
@@ -92,3 +110,86 @@ def validate_planned_prompt_items(
         seen_prompts.add(normalized_prompt)
 
     return None
+
+
+async def plan_with_chain(
+    planning_prompt: str,
+    count: int,
+    chain: list[tuple[Any, str]],
+    *,
+    timeout_seconds: int,
+    retries_per_model: int,
+    logger,
+) -> list[PlannedPromptItem]:
+    """按模型链顺序规划批量提示词；单模型失败重试后切换下一个，全链失败抛 RuntimeError。
+
+    Args:
+        planning_prompt: build_batch_planning_prompt 的输出。
+        count: 目标提示词条数。
+        chain: [(provider_obj, provider_id), ...]，按优先级排列。
+        timeout_seconds: 单次 text_chat 的等待上限（秒）。
+        retries_per_model: 每个模型失败后的额外重试次数（0 = 失败立即切换下一个）。
+        logger: 插件 logger。
+
+    Returns:
+        通过校验的提示词条目列表。
+
+    Raises:
+        RuntimeError: 链为空或全部尝试失败。
+    """
+
+    providers = [(provider, str(pid)) for provider, pid in (chain or []) if provider is not None]
+    if not providers:
+        raise RuntimeError("批量提示词规划失败: 模型链为空，没有可用的规划模型。")
+
+    attempts_per_model = max(0, int(retries_per_model)) + 1
+    timeout = max(1, int(timeout_seconds))
+    last_error: Exception | None = None
+
+    for chain_index, (provider, provider_id) in enumerate(providers):
+        for attempt in range(1, attempts_per_model + 1):
+            try:
+                llm_response = await asyncio.wait_for(
+                    provider.text_chat(
+                        prompt=planning_prompt,
+                        contexts=[],
+                        image_urls=[],
+                        func_tool=None,
+                        system_prompt=PLANNER_SYSTEM_PROMPT,
+                    ),
+                    timeout=timeout,
+                )
+                text = str(getattr(llm_response, "completion_text", "") or "").strip()
+                if not text:
+                    raise RuntimeError("LLM returned empty planner output")
+                items = parse_planned_prompt_items(text)
+                validation_error = validate_planned_prompt_items(
+                    items, expected_count=count
+                )
+                if validation_error is not None:
+                    raise ValueError(validation_error)
+                if attempt > 1 or chain_index > 0:
+                    logger.info(
+                        "[batch-planner] 规划成功: provider=%s attempt=%s",
+                        provider_id,
+                        attempt,
+                    )
+                return items
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "[batch-planner] provider=%s 第%s/%s次尝试失败: %s",
+                    provider_id,
+                    attempt,
+                    attempts_per_model,
+                    exc,
+                )
+
+    tried = ", ".join(pid for _, pid in providers)
+    raise RuntimeError(
+        "批量提示词规划失败: "
+        f"已依次尝试模型 [{tried}]（每个 {attempts_per_model} 次），"
+        f"最后错误: {_friendly_planner_error(last_error) if last_error else '未知错误'}"
+    )

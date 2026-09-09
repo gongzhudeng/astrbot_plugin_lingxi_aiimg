@@ -380,6 +380,38 @@
             "description": "单次批量最大张数",
             "hint": "超过此数量将直接拒绝，避免一次性提交过多任务。",
             "default": 8
+          },
+          "planner_provider_ids": {
+            "type": "list",
+            "items": {
+              "type": "string"
+            },
+            "description": "批量规划模型链（按顺序尝试，留空=跟随对话模型）",
+            "hint": "批量出图前会先用 LLM 把 N 张拆成 N 条提示词，此处选择用哪些模型来做规划。从上往下依次重试；全部失败则整批报错。留空时自动使用主配置的默认对话模型 + fallback 备用链，与聊天使用同一套切换顺序。",
+            "_special": "select_providers",
+            "default": []
+          },
+          "planner_timeout_seconds": {
+            "type": "int",
+            "description": "规划单次请求超时（秒）",
+            "hint": "规划模型单次调用的等待上限，超时按失败处理并重试/切换下一个模型。",
+            "slider": {
+              "min": 10,
+              "max": 300,
+              "step": 5
+            },
+            "default": 60
+          },
+          "planner_retries_per_model": {
+            "type": "int",
+            "description": "每个规划模型的重试次数",
+            "hint": "同一模型失败后再重试 N 次才切换下一个；0 = 失败立即换下一个模型。",
+            "slider": {
+              "min": 0,
+              "max": 5,
+              "step": 1
+            },
+            "default": 1
           }
         }
       }

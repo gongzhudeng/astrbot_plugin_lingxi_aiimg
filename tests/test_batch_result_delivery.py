@@ -354,12 +354,16 @@ def _load_module():
         ParsedImageRequest=_StubParsedImageRequest,
         parse_image_request=lambda *args, **kwargs: _StubParsedImageRequest(),
     )
+    async def _stub_plan_with_chain(*args, **kwargs):
+        return []
+
     _install_stub_module(
         f"{CORE_PACKAGE_NAME}.llm_batch_planner",
         PlannedPromptItem=_StubPlannedPromptItem,
         build_batch_planning_prompt=lambda *args, **kwargs: "",
         parse_planned_prompt_items=lambda *args, **kwargs: [],
         validate_planned_prompt_items=lambda *args, **kwargs: [],
+        plan_with_chain=_stub_plan_with_chain,
     )
     _install_stub_module(
         f"{CORE_PACKAGE_NAME}.image_format",

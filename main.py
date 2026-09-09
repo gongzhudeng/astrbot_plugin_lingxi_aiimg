@@ -76,6 +76,7 @@ from .core.image_task_parser import (
 from .core.llm_batch_planner import (
     PlannedPromptItem,
     build_batch_planning_prompt,
+    plan_with_chain,
     parse_planned_prompt_items,
     validate_planned_prompt_items,
 )
@@ -3298,6 +3299,7 @@ class GiteeAIImagePlugin(Star):
             "reference_source": ref_source,
             "reference_count": len(ref_images),
             "extra_reference_count": len(extra_bytes),
+            "control_text": str(getattr(event, "message_str", "") or ""),
         }
         task_meta = self._build_image_task_meta(
             mode="selfie_ref",
@@ -3636,7 +3638,7 @@ class GiteeAIImagePlugin(Star):
                 extra_reference_count=int(
                     job.options.get("extra_reference_count") or 0
                 ),
-                control_text=str(getattr(event, "message_str", "") or ""),
+                control_text=str(job.options.get("control_text") or ""),
             )
             task_meta = self._build_image_task_meta(
                 mode="selfie_ref",
@@ -4760,42 +4762,104 @@ class GiteeAIImagePlugin(Star):
         user_prompt: str,
         count: int,
     ) -> list[PlannedPromptItem]:
-        provider = self.context.get_using_provider()
-        if provider is None or not hasattr(provider, "text_chat"):
-            raise RuntimeError("当前没有可用的 LLM 提供商，无法规划批量提示词。")
-
+        chain = self._resolve_planner_provider_chain()
+        batch_conf = self._get_feature("batch")
+        timeout_seconds = min(
+            300, max(10, self._as_int(batch_conf.get("planner_timeout_seconds"), default=60))
+        )
+        retries_per_model = min(
+            5, max(0, self._as_int(batch_conf.get("planner_retries_per_model"), default=1))
+        )
         planning_prompt = build_batch_planning_prompt(
             mode=mode,
             user_prompt=user_prompt,
             count=count,
         )
-        last_error: Exception | None = None
-        for _ in range(3):
-            llm_response = await provider.text_chat(
-                prompt=planning_prompt,
-                contexts=[],
-                image_urls=[],
-                func_tool=None,
-                system_prompt=(
-                    "You plan image prompt sets. Output JSON only. "
-                    "No markdown, no code fence, no explanation."
-                ),
-            )
-            text = str(getattr(llm_response, "completion_text", "") or "").strip()
-            if not text:
-                last_error = RuntimeError("LLM returned empty planner output")
+        return await plan_with_chain(
+            planning_prompt,
+            count,
+            chain,
+            timeout_seconds=timeout_seconds,
+            retries_per_model=retries_per_model,
+            logger=logger,
+        )
+
+    def _resolve_planner_provider_chain(self) -> list[tuple[Any, str]]:
+        """解析批量规划模型链。
+
+        优先级：
+        1. 插件配置 features.batch.planner_provider_ids（非空时逐个解析）。
+        2. AstrBot 主配置 provider_settings 的 default_provider_id + fallback_chat_models
+           （与聊天层同一套切换顺序，主模型 402/超时时规划也能自动切换）。
+        3. 旧行为兜底：get_using_provider()。
+        """
+
+        batch_conf = self._get_feature("batch")
+        configured_ids = batch_conf.get("planner_provider_ids")
+        ids: list[str] = []
+        if isinstance(configured_ids, (list, tuple)):
+            ids = [str(x).strip() for x in configured_ids if str(x).strip()]
+        elif isinstance(configured_ids, str) and configured_ids.strip():
+            ids = [
+                part.strip()
+                for part in configured_ids.replace("，", ",").split(",")
+                if part.strip()
+            ]
+
+        if not ids:
+            ids = self._read_conversation_fallback_chain()
+
+        chain: list[tuple[Any, str]] = []
+        seen: set[str] = set()
+        for pid in ids:
+            if pid in seen:
                 continue
+            seen.add(pid)
             try:
-                items = parse_planned_prompt_items(text)
-                validation_error = validate_planned_prompt_items(
-                    items, expected_count=count
-                )
-                if validation_error is not None:
-                    raise ValueError(validation_error)
-                return items
+                provider = self.context.get_provider_by_id(pid)
             except Exception as exc:
-                last_error = exc
-        raise RuntimeError(f"批量提示词规划失败: {last_error}")
+                logger.warning("[batch-planner] 解析规划模型 %s 失败: %s", pid, exc)
+                continue
+            if provider is None:
+                logger.warning(
+                    "[batch-planner] 规划模型不存在，已跳过: %s", pid
+                )
+                continue
+            if not hasattr(provider, "text_chat"):
+                logger.warning(
+                    "[batch-planner] 规划模型不是对话类型，已跳过: %s", pid
+                )
+                continue
+            chain.append((provider, pid))
+
+        if not chain:
+            provider = self.context.get_using_provider()
+            if provider is not None and hasattr(provider, "text_chat"):
+                chain.append((provider, "default_using_provider"))
+        return chain
+
+    def _read_conversation_fallback_chain(self) -> list[str]:
+        """从 AstrBot 主配置读取对话层的默认模型与 fallback 顺序。"""
+
+        ids: list[str] = []
+        try:
+            cfg = self.context.get_config()
+        except Exception as exc:
+            logger.debug("[batch-planner] 读取主配置失败: %s", exc)
+            return ids
+        try:
+            settings = cfg.get("provider_settings", {}) if hasattr(cfg, "get") else {}
+            if not isinstance(settings, dict):
+                settings = {}
+            default_id = str(settings.get("default_provider_id") or "").strip()
+            if default_id:
+                ids.append(default_id)
+            fallback = settings.get("fallback_chat_models") or []
+            if isinstance(fallback, (list, tuple)):
+                ids.extend(str(x).strip() for x in fallback if str(x).strip())
+        except Exception as exc:
+            logger.debug("[batch-planner] 解析对话 fallback 链失败: %s", exc)
+        return ids
 
     def _resolve_llm_batch_mode(self, mode: str) -> str:
         normalized = self._normalize_llm_image_mode(mode)
