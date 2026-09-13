@@ -975,6 +975,12 @@ class BackgroundImageTaskManager:
                 sent = int(record.get("sent_count") or 0)
                 unknown = int(record.get("unknown_count") or 0)
                 valid = requested > 0 and sent == requested and unknown == 0
+            elif record.get("task_kind") == "video":
+                valid = (
+                    bool(record.get("video_generated"))
+                    and bool(record.get("video_sent"))
+                    and record.get("delivery_state") == "confirmed"
+                )
             else:
                 valid = (
                     bool(record.get("image_generated"))

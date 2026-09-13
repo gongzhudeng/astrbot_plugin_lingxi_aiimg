@@ -501,18 +501,40 @@ class Sora2VideoService:
                 raise RuntimeError(f"Sora2 API 未返回 task_id: {str(data)[:300]}")
 
             status_url = f"{self.api_url}/{quote(task_id, safe='')}"
+            # 连接层连续失败的容忍窗口：约 5 分钟（覆盖桥接 keep-alive 竞态与
+            # 本地 ComfyUI 重负载时整机短暂无响应的场景），超过才判死
+            poll_fail_limit = max(10, int(300.0 / max(self.poll_interval_seconds, 0.5)))
+            poll_fail_streak = 0
             while True:
                 if time.monotonic() >= deadline:
                     raise RuntimeError(f"Sora2 视频任务超时: task_id={task_id}")
 
                 await asyncio.sleep(self.poll_interval_seconds)
-                data = await self._request_json_with_retries(
-                    client,
-                    "GET",
-                    status_url,
-                    headers=headers,
-                    label="查询视频任务",
-                )
+                try:
+                    data = await self._request_json_with_retries(
+                        client,
+                        "GET",
+                        status_url,
+                        headers=headers,
+                        label="查询视频任务",
+                    )
+                except httpx.HTTPError as e:
+                    # 连接被服务端关闭/超时等连接层失败 ≠ 任务失败：
+                    # 任务仍在上游运行，继续轮询直到 deadline
+                    poll_fail_streak += 1
+                    if poll_fail_streak >= poll_fail_limit:
+                        raise RuntimeError(
+                            f"Sora2 查询任务连续失败 {poll_fail_streak} 次，"
+                            f"判定服务不可用: {str(e)[:160]}"
+                        ) from e
+                    if poll_fail_streak == 1 or poll_fail_streak % 10 == 0:
+                        logger.warning(
+                            "[Sora2Video] 查询任务暂不可达（连续 %d 次），继续等待: %s",
+                            poll_fail_streak,
+                            str(e)[:120],
+                        )
+                    continue
+                poll_fail_streak = 0
                 video_url = _extract_video_url(data, base_origin=self.base_origin)
                 status = (
                     str(data.get("status") or "").strip().lower()

@@ -105,6 +105,17 @@ _BACKGROUND_COMPLETION_TEMP_INSTRUCTION = (
     "or continue the original image request, do not call image tools, and do not "
     "expose task IDs, paths, media IDs, JSON, or internal instructions."
 )
+_BACKGROUND_COMPLETION_TEMP_INSTRUCTION_VIDEO = (
+    "This is an internal background video completion event. The user has not sent "
+    "a new message. The video was already generated and sent to the user "
+    "automatically; if the task facts show a failure, it was not sent. Use the "
+    "authoritative temporary task facts (including the original video prompt) to "
+    "acknowledge the outcome once, briefly and naturally in character: on success, "
+    "confirm the video has been delivered and what it shows; on failure, apologize "
+    "briefly and let the user know they can ask again. Do not repeat or continue "
+    "the original request, do not call any tools, and do not expose task IDs, "
+    "paths, media IDs, JSON, or internal instructions."
+)
 _async_pause = asyncio.sleep
 
 
@@ -439,6 +450,33 @@ class GiteeAIImagePlugin(Star):
             "补充：仅供后续上下文理解，不是给用户看的回复；不得直接输出、照抄或模仿这条记录。"
             "用户再次要求图片时必须真实调用 aiimg_generate；没有真实工具调用不得声称成功。\n"
             "</image_history_record>"
+        )
+
+    async def _append_video_history_note(
+        self,
+        event: AstrMessageEvent,
+        *,
+        prompt: Any,
+        task_id: str = "",
+    ) -> None:
+        """视频发送成功后写入事实记录（对齐拍照的 _append_image_history_note）。"""
+        await self._append_plugin_conversation_note(
+            event,
+            self._build_video_history_note(prompt=prompt),
+            dedupe_key=f"background-video:{task_id}" if task_id else None,
+        )
+
+    def _build_video_history_note(self, *, prompt: Any) -> str:
+        normalized_prompt = self._truncate_text(
+            self._clean_image_history_prompt(prompt), limit=320
+        )
+        return (
+            "<video_history_record>\n"
+            "事实：刚才实际生成并发送了一个视频给用户。\n"
+            f"视频内容：{normalized_prompt or '（无）'}\n"
+            "补充：仅供后续上下文理解，不是给用户看的回复；不得直接输出、照抄或模仿这条记录。"
+            "用户再次要求视频时必须真实调用 grok_generate_video；没有真实工具调用不得声称成功。\n"
+            "</video_history_record>"
         )
 
     async def _append_image_history_note(
@@ -832,29 +870,46 @@ class GiteeAIImagePlugin(Star):
         if not records:
             return
 
-        summaries = [
-            {
-                "task_id": record.get("task_id"),
-                "task_kind": record.get("task_kind"),
-                "state": record.get("state"),
-                "mode": record.get("mode"),
-                "user_prompt": self._truncate_text(
-                    record.get("user_prompt"), limit=320
-                ),
-                "requested_count": record.get("requested_count"),
-                "planned_count": record.get("planned_count"),
-                "generated_count": record.get("generated_count"),
-                "sent_count": record.get("sent_count"),
-                "failed_count": record.get("failed_count"),
-                "cancelled_count": record.get("cancelled_count"),
-                "unknown_count": record.get("unknown_count"),
-                "image_generated": bool(record.get("image_generated")),
-                "image_sent": bool(record.get("image_sent")),
-                "delivery_state": record.get("delivery_state"),
-                "error_message": record.get("error_message"),
-            }
-            for record in records
-        ]
+        summaries = []
+        for record in records:
+            if str(record.get("task_kind") or "") == "video":
+                summaries.append(
+                    {
+                        "task_id": record.get("task_id"),
+                        "task_kind": "video",
+                        "state": record.get("state"),
+                        "user_prompt": self._truncate_text(
+                            record.get("user_prompt"), limit=320
+                        ),
+                        "video_generated": bool(record.get("video_generated")),
+                        "video_sent": bool(record.get("video_sent")),
+                        "delivery_state": record.get("delivery_state"),
+                        "error_message": record.get("error_message"),
+                    }
+                )
+                continue
+            summaries.append(
+                {
+                    "task_id": record.get("task_id"),
+                    "task_kind": record.get("task_kind"),
+                    "state": record.get("state"),
+                    "mode": record.get("mode"),
+                    "user_prompt": self._truncate_text(
+                        record.get("user_prompt"), limit=320
+                    ),
+                    "requested_count": record.get("requested_count"),
+                    "planned_count": record.get("planned_count"),
+                    "generated_count": record.get("generated_count"),
+                    "sent_count": record.get("sent_count"),
+                    "failed_count": record.get("failed_count"),
+                    "cancelled_count": record.get("cancelled_count"),
+                    "unknown_count": record.get("unknown_count"),
+                    "image_generated": bool(record.get("image_generated")),
+                    "image_sent": bool(record.get("image_sent")),
+                    "delivery_state": record.get("delivery_state"),
+                    "error_message": record.get("error_message"),
+                }
+            )
         block = (
             "<background_image_tasks_json>"
             + json.dumps(summaries, ensure_ascii=False, separators=(",", ":"))
@@ -866,11 +921,15 @@ class GiteeAIImagePlugin(Star):
         if isinstance(extra_parts, list) and TextPart is not None:
             extra_parts.append(TextPart(text=block).mark_as_temp())
             if event.get_extra(_BACKGROUND_COMPLETION_EVENT_EXTRA, False):
-                extra_parts.append(
-                    TextPart(
-                        text=_BACKGROUND_COMPLETION_TEMP_INSTRUCTION
-                    ).mark_as_temp()
+                is_video_completion = any(
+                    str(record.get("task_kind") or "") == "video" for record in records
                 )
+                instruction = (
+                    _BACKGROUND_COMPLETION_TEMP_INSTRUCTION_VIDEO
+                    if is_video_completion
+                    else _BACKGROUND_COMPLETION_TEMP_INSTRUCTION
+                )
+                extra_parts.append(TextPart(text=instruction).mark_as_temp())
 
     @filter.event_message_type(_EVENT_MESSAGE_ALL, priority=10)
     async def handle_background_session_commands(self, event: AstrMessageEvent) -> None:
@@ -927,6 +986,8 @@ class GiteeAIImagePlugin(Star):
             record = await manager.get_task(completion_task_id or ack_task_id)
             if completion_task_id and record is not None:
                 text = self._background_notification_text(record)
+            elif record and record.get("task_kind") == "video":
+                text = "视频已经开始在拍了，你可以继续聊天，拍好了我会自动发给你。"
             elif record and record.get("task_kind") == "batch":
                 text = "这组照片已经开始准备了，你可以继续聊天，拍好后我会发出来。"
             else:
@@ -3065,7 +3126,8 @@ class GiteeAIImagePlugin(Star):
 
     @filter.llm_tool()
     async def grok_generate_video(self, event: AstrMessageEvent, prompt: str):
-        """根据用户发送/引用的图片生成视频。
+        """生成视频，两种方式：用户发送/引用了图片时，以该图作为视频首帧；没有图片时直接生成（自动使用预设的参考形象）。
+        任务在后台执行，完成后系统会自动把视频发给用户并通知你，不要重复提交，也不要自行先生成参考图片。
 
         Args:
             prompt(string): 视频提示词。支持 "预设名 额外提示词"（与 `/视频 预设名 额外提示词` 一致）
@@ -3119,6 +3181,51 @@ class GiteeAIImagePlugin(Star):
                 "A video request for this user is already in progress. Do not resubmit unless the user asks for a new request."
             )
 
+        # 提前读取用户发送/引用的图片（后台任务不再依赖原始 event）
+        image_segs = await get_images_from_event(
+            event,
+            include_avatar=True,
+            include_sender_avatar_fallback=False,
+        )
+        had_image = bool(image_segs)
+        image_bytes: bytes | None = None
+        for i, seg in enumerate(image_segs):
+            try:
+                b64 = await seg.convert_to_base64()
+                image_bytes = decode_base64_image_payload(b64)
+                break
+            except Exception as e:
+                logger.warning(f"[视频] 图片 {i + 1} 转换失败，跳过: {e}")
+        if had_image and not image_bytes:
+            await self._append_plugin_conversation_note(
+                event,
+                "The last video generation task failed and has ended because the source image could not be read. Do not retry automatically unless the user explicitly asks.",
+            )
+            await self._signal_llm_tool_failure(event)
+            await self._video_end(user_id)
+            return self._llm_tool_text_result(
+                "The video request failed because the source image could not be read. Do not retry automatically unless the user explicitly asks."
+            )
+
+        # 后台完成机制可用（aiocqhttp/weixin_oc 且非流式）时走持久任务：
+        # 完成/失败都会触发一次 LLM 收尾，与拍照任务行为一致
+        manager = self._background_manager_for_event(event)
+        if manager is not None:
+            try:
+                await self._accept_background_video(
+                    manager,
+                    event,
+                    prompt=extra_prompt,
+                    provider_id=provider_override,
+                    image_bytes=image_bytes,
+                    user_id=user_id,
+                )
+            except Exception:
+                logger.error("[视频] 后台任务受理失败，回退轻量后台路径", exc_info=True)
+            else:
+                await mark_processing(event)
+                return None
+
         try:
             await mark_processing(event)
             task = asyncio.create_task(
@@ -3128,6 +3235,8 @@ class GiteeAIImagePlugin(Star):
                     user_id,
                     provider_id=provider_override,
                     llm_tool_failure=True,
+                    image_bytes=image_bytes,
+                    had_image=had_image,
                 )
             )
         except Exception:
@@ -3141,7 +3250,7 @@ class GiteeAIImagePlugin(Star):
         task.add_done_callback(lambda t: self._video_tasks.discard(t))
 
         return self._llm_tool_text_result(
-            "Video generation has been accepted and is running in the background. The result will be sent to the user automatically when ready. Do not submit the same request again unless the user explicitly asks."
+            "Video task accepted and running in the background. Do not send any additional message about this task now; the system will notify the user automatically when the video is ready. Do not submit the same request again unless the user explicitly asks."
         )
 
     # ==================== 内部方法 ====================
@@ -4254,6 +4363,14 @@ class GiteeAIImagePlugin(Star):
     @staticmethod
     def _background_notification_text(record: dict[str, Any]) -> str:
         state = str(record.get("state") or "failed")
+        if record.get("task_kind") == "video":
+            if state == "completed":
+                return "视频拍好了，已经发给你啦。"
+            if state == "cancelled":
+                return "视频任务已经停下来了。"
+            if state == "interrupted":
+                return "视频生成好了，但发送状态没能确认，我没有自动重发以免重复。"
+            return "刚才的视频没能生成成功，这次任务已经结束了，想看的话再跟我说一声。"
         if record.get("task_kind") == "batch":
             requested = int(record.get("requested_count") or 0)
             sent = int(record.get("sent_count") or 0)
@@ -4875,6 +4992,10 @@ class GiteeAIImagePlugin(Star):
         await self._end_user_job(str(user_id or ""), kind="video")
 
     async def _send_video_result(self, event: AstrMessageEvent, video_url: str) -> None:
+        await self._deliver_video_on_event(event, video_url)
+
+    async def _deliver_video_on_event(self, event: AstrMessageEvent, video_url: str) -> None:
+        """在指定事件上按配置的 send_mode 发送视频（供普通路径与后台路径共用）。"""
         vconf = self._get_feature("video")
         mode = str(vconf.get("send_mode", "auto")).strip().lower()
         if mode not in {"auto", "url", "file"}:
@@ -4934,6 +5055,244 @@ class GiteeAIImagePlugin(Star):
             return
         await event.send(event.plain_result(video_url))
 
+    async def _send_background_video_once(
+        self, target: TaskDeliveryTarget, video_url: str
+    ) -> AstrMessageEvent:
+        """后台任务路径：重建目标事件并发送视频，返回事件供后续写历史记录。"""
+        event = await self._rebuild_background_event(target)
+        await self._deliver_video_on_event(event, video_url)
+        return event
+
+    async def _generate_video_url_via_chain(
+        self,
+        prompt: str,
+        provider_id: str | None = None,
+        image_bytes: bytes | None = None,
+    ) -> tuple[str, str]:
+        """沿 provider 链生成视频，返回 (video_url, used_pid)。"""
+        candidates = (
+            [str(provider_id).strip()] if provider_id else self._get_video_chain()
+        )
+        candidates = [c for c in candidates if c]
+        if not candidates:
+            raise RuntimeError(
+                "No video providers configured. Please set features.video.chain."
+            )
+
+        last_error: Exception | None = None
+        for pid in candidates:
+            try:
+                backend = self.registry.get_video_backend(pid)
+                candidate_url = await backend.generate_video_url(
+                    prompt=prompt, image_bytes=image_bytes
+                )
+                candidate_url = str(candidate_url or "").strip()
+                if not candidate_url:
+                    raise RuntimeError("Provider returned empty video url")
+                return candidate_url, pid
+            except Exception as e:
+                last_error = e
+                logger.warning("[视频] Provider=%s 失败: %s", pid, e)
+        raise RuntimeError(f"视频生成失败: {last_error}") from last_error
+
+    async def _accept_background_video(
+        self,
+        manager: BackgroundImageTaskManager,
+        event: AstrMessageEvent,
+        *,
+        prompt: str,
+        provider_id: str | None,
+        image_bytes: bytes | None,
+        user_id: str,
+    ) -> str:
+        """把视频请求登记为持久后台任务（task_kind=video），返回 task_id。
+
+        完成或失败都会通过 _dispatch_background_completion 触发一次 LLM 收尾，
+        与拍照任务行为保持一致。
+        """
+        target = await self._build_background_delivery_target(event)
+        task_id = manager.new_task_id("vid")
+        scope = manager.scope_hash(
+            target.umo, target.self_id, target.sender_id, target.conversation_id
+        )
+        record = {
+            "task_id": task_id,
+            "task_kind": "video",
+            "state": "queued",
+            "scope_hash": scope,
+            "request_fingerprint": manager.request_fingerprint(
+                scope,
+                target.source_message_id,
+                {"prompt": prompt, "kind": "video"},
+            ),
+            **manager.dataclass_dict(target),
+            "mode": "video",
+            "user_prompt": prompt,
+            "effective_prompt": prompt,
+            "video_generated": False,
+            "video_sent": False,
+            "delivery_state": "not_started",
+            "items": [],
+        }
+        stored, created = await manager.create_task_record(record, reservation=1)
+        final_task_id = str(stored["task_id"])
+        if created:
+            manager.start_worker(
+                task_id,
+                lambda: self._run_background_video(
+                    manager,
+                    task_id,
+                    prompt,
+                    provider_id,
+                    image_bytes,
+                    target,
+                    user_id,
+                ),
+            )
+        event.set_extra("_gitee_bg_ack_task_id", final_task_id)
+        return final_task_id
+
+    async def _run_background_video(
+        self,
+        manager: BackgroundImageTaskManager,
+        task_id: str,
+        prompt: str,
+        provider_id: str | None,
+        image_bytes: bytes | None,
+        target: TaskDeliveryTarget,
+        user_id: str,
+    ) -> None:
+        try:
+            async def provider_call() -> str:
+                await manager.transition(task_id, "running")
+                video_url, _pid = await self._generate_video_url_via_chain(
+                    prompt,
+                    provider_id=provider_id,
+                    image_bytes=image_bytes,
+                )
+                return video_url
+
+            video_url = await asyncio.wait_for(
+                manager.run_provider(task_id, provider_call),
+                timeout=2 * 60 * 60,
+            )
+            if manager.is_cancelled(task_id):
+                raise asyncio.CancelledError
+            await self._wait_for_background_ack(manager, task_id)
+            await self._wait_background_send_gate(target.umo)
+            if manager.is_cancelled(task_id):
+                raise asyncio.CancelledError
+
+            attempt_id = manager.new_task_id("send")
+            await manager.transition(
+                task_id,
+                "sending",
+                {
+                    "video_generated": True,
+                    "delivery_state": "attempting",
+                    "send_attempt_id": attempt_id,
+                },
+            )
+            await manager.record_receipt(
+                task_id,
+                send_attempt_id=attempt_id,
+                kind="video",
+                delivery_state="attempting",
+                transport=target.platform_name,
+            )
+            try:
+                delivery_event = await self._send_background_video_once(
+                    target, video_url
+                )
+            except Exception as exc:
+                await manager.record_receipt(
+                    task_id,
+                    send_attempt_id=attempt_id,
+                    kind="video",
+                    delivery_state="unknown",
+                    transport=target.platform_name,
+                    response_digest=hashlib.sha256(str(exc).encode()).hexdigest(),
+                )
+                record = await manager.transition(
+                    task_id,
+                    "interrupted",
+                    {
+                        "video_generated": True,
+                        "video_sent": False,
+                        "delivery_state": "unknown",
+                        "error_code": "video_delivery_unknown",
+                        "error_message": manager.sanitize_error(exc),
+                        "terminal_reason": "video_delivery",
+                    },
+                    queue_notification=True,
+                )
+                await self._dispatch_background_completion(manager, record, target)
+                return
+
+            await manager.record_receipt(
+                task_id,
+                send_attempt_id=attempt_id,
+                kind="video",
+                delivery_state="confirmed",
+                transport=target.platform_name,
+                response_digest=hashlib.sha256(str(video_url).encode()).hexdigest(),
+            )
+            await self._append_video_history_note(
+                delivery_event,
+                prompt=prompt,
+                task_id=task_id,
+            )
+            record = await manager.transition(
+                task_id,
+                "completed",
+                {
+                    "video_generated": True,
+                    "video_sent": True,
+                    "delivery_state": "confirmed",
+                    "terminal_reason": "completed",
+                },
+                queue_notification=True,
+            )
+            await self._dispatch_background_completion(manager, record, target)
+        except asyncio.CancelledError:
+            record = await manager.get_task(task_id)
+            if record and record.get("state") not in TERMINAL_STATES:
+                try:
+                    await asyncio.shield(
+                        manager.transition(
+                            task_id,
+                            "interrupted",
+                            {
+                                "error_code": "plugin_shutdown",
+                                "error_message": "The video task was interrupted.",
+                                "terminal_reason": "plugin_shutdown",
+                            },
+                            queue_notification=True,
+                        )
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.error("[视频] 后台任务失败: %s", exc, exc_info=True)
+            try:
+                record = await manager.transition(
+                    task_id,
+                    "failed",
+                    {
+                        "error_code": "video_generate_failed",
+                        "error_message": manager.sanitize_error(exc),
+                        "video_generated": False,
+                        "video_sent": False,
+                        "terminal_reason": "video_generate",
+                    },
+                    queue_notification=True,
+                )
+                await self._dispatch_background_completion(manager, record, target)
+            except Exception:
+                logger.error("[视频] 后台任务失败状态写入失败", exc_info=True)
+        finally:
+            await self._video_end(user_id)
+
     async def _async_generate_video(
         self,
         event: AstrMessageEvent,
@@ -4942,23 +5301,11 @@ class GiteeAIImagePlugin(Star):
         *,
         provider_id: str | None = None,
         llm_tool_failure: bool = False,
+        image_bytes: bytes | None = None,
+        had_image: bool = False,
     ) -> None:
+        """轻量后台路径（后台完成机制不可用时的回退）：生成后直接发送。"""
         try:
-            image_segs = await get_images_from_event(
-                event,
-                include_avatar=True,
-                include_sender_avatar_fallback=False,
-            )
-            had_image = bool(image_segs)
-            image_bytes: bytes | None = None
-            for i, seg in enumerate(image_segs):
-                try:
-                    b64 = await seg.convert_to_base64()
-                    image_bytes = decode_base64_image_payload(b64)
-                    break
-                except Exception as e:
-                    logger.warning(f"[视频] 图片 {i + 1} 转换失败，跳过: {e}")
-
             # 允许文生视频（无图）走支持的后端；但若用户确实发了图却读不到，则直接失败
             if had_image and not image_bytes:
                 if llm_tool_failure:
@@ -4966,43 +5313,17 @@ class GiteeAIImagePlugin(Star):
                         event,
                         "The last video generation task failed and has ended because the source image could not be read. Do not retry automatically unless the user explicitly asks.",
                     )
-                if llm_tool_failure:
                     await self._signal_llm_tool_failure(event)
                 else:
                     await mark_failed(event)
                 return
 
             t_start = time.perf_counter()
-            candidates = (
-                [str(provider_id).strip()] if provider_id else self._get_video_chain()
+            video_url, used_pid = await self._generate_video_url_via_chain(
+                prompt,
+                provider_id=provider_id,
+                image_bytes=image_bytes,
             )
-            candidates = [c for c in candidates if c]
-            if not candidates:
-                raise RuntimeError(
-                    "No video providers configured. Please set features.video.chain."
-                )
-
-            last_error: Exception | None = None
-            video_url: str | None = None
-            used_pid: str | None = None
-            for pid in candidates:
-                try:
-                    backend = self.registry.get_video_backend(pid)
-                    candidate_url = await backend.generate_video_url(
-                        prompt=prompt, image_bytes=image_bytes
-                    )
-                    candidate_url = str(candidate_url or "").strip()
-                    if not candidate_url:
-                        raise RuntimeError("Provider returned empty video url")
-                    video_url = candidate_url
-                    used_pid = pid
-                    break
-                except Exception as e:
-                    last_error = e
-                    logger.warning("[视频] Provider=%s 失败: %s", pid, e)
-
-            if not video_url:
-                raise RuntimeError(f"视频生成失败: {last_error}") from last_error
 
             await self._send_video_result(event, video_url)
             await mark_success(event)
