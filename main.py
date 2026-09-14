@@ -96,7 +96,7 @@ _BATCH_COMMAND_PATTERN = re.compile(r"[/!！.。．]批量(?:\s*\d+|\d+)")
 _BACKGROUND_COMPLETION_EVENT_EXTRA = "_gitee_bg_internal_completion"
 _BACKGROUND_COMPLETION_REQUEST_EXTRA = "_gitee_bg_completion_request"
 _BACKGROUND_COMPLETION_HISTORY_PLACEHOLDER = (
-    "【会话占位：用户未发送新消息；助手在图片任务完成后补充通知】"
+    "【会话占位：用户未发送新消息；助手在后台任务完成后补充通知】"
 )
 _BACKGROUND_COMPLETION_TEMP_INSTRUCTION = (
     "This is an internal background image completion event. The user has not sent "
