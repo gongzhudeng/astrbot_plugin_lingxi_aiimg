@@ -4680,6 +4680,40 @@ class GiteeAIImagePlugin(Star):
                 out.append(pid)
         return out
 
+    def _build_video_prompt(self, prompt: str) -> str:
+        """视频提示词兜底：配置前缀 + 今日穿搭/时间光线。
+
+        穿搭检测与自拍（生图）共用同一套配置与关键词
+        （today_outfit_enabled、outfit_force/skip/auto_keywords）：
+        提示词里出现临时穿搭词时今日穿搭自动留空；
+        控制词会从提示词中剥离，不会传给视频模型。
+        """
+        user_prompt, outfit = self._prepare_selfie_prompt_context(prompt or "")
+        user_prompt = self._expand_time_placeholders(user_prompt or "")
+        prefix = str(
+            self._get_feature("video").get("prompt_prefix", "") or ""
+        ).strip()
+        if not prefix:
+            prefix = (
+                "真实生活感随手拍视频，手机手持拍摄质感，高清写实。\n"
+                "今日外显穿搭：{today_outfit}\n"
+                "当前时间光线：{lighting}"
+            )
+        has_outfit_placeholder = "{today_outfit}" in prefix
+        has_lighting_placeholder = "{lighting}" in prefix
+        lighting = self._resolve_lighting_placeholder()
+        filled = prefix.replace("{today_outfit}", outfit).replace("{lighting}", lighting)
+        if outfit and not has_outfit_placeholder:
+            filled = f"{filled}\n今日外显穿搭：{outfit}"
+        if not has_lighting_placeholder:
+            filled = f"{filled}\n当前时间光线：{lighting}"
+        filled = self._expand_time_placeholders(filled)
+        # 穿搭留空时清掉空值标签行，避免空"今日外显穿搭："标签送进视频模型
+        filled = re.sub(r"(?m)^今日外显穿搭：\s*$\n?", "", filled).strip()
+        if not filled:
+            return user_prompt
+        return f"{filled}\n\n用户要求：{user_prompt}" if user_prompt else filled
+
     def _parse_video_args(self, text: str) -> tuple[str | None, str]:
         """解析 /视频 参数，返回 (preset, prompt)
 
@@ -5070,6 +5104,10 @@ class GiteeAIImagePlugin(Star):
         image_bytes: bytes | None = None,
     ) -> tuple[str, str]:
         """沿 provider 链生成视频，返回 (video_url, used_pid)。"""
+        effective_prompt = self._build_video_prompt(prompt)
+        if effective_prompt != (prompt or "").strip():
+            logger.debug("[视频] 兜底前缀已拼接: %s...", effective_prompt[:80])
+        prompt = effective_prompt
         candidates = (
             [str(provider_id).strip()] if provider_id else self._get_video_chain()
         )

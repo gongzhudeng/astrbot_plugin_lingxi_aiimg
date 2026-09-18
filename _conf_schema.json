@@ -336,6 +336,12 @@
             "hint": "格式：预设名:英文提示词。例如：日常:Daily outfit, cinematic, walking",
             "default": []
           },
+          "prompt_prefix": {
+            "type": "text",
+            "description": "视频提示词前缀",
+            "hint": "留空使用内置默认。支持占位符：{now}=当前日期时间、{date}=当前日期、{time}=当前时间、{weekday}=星期几、{today_outfit}=忙碌日程插件的今日外显穿搭（自动剔除内衣/内裤）、{lighting}=按当前时间规则生成的光线描述。穿搭与自拍（生图）共用同一套临时穿搭检测关键词与控制词：提示词出现服装词时今日穿搭自动留空。",
+            "default": "真实生活感随手拍视频，手机手持拍摄质感，高清写实。\n今日外显穿搭：{today_outfit}\n当前时间光线：{lighting}"
+          },
           "send_mode": {
             "type": "string",
             "description": "发送方式",
