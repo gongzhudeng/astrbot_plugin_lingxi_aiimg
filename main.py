@@ -159,6 +159,9 @@ class GiteeAIImagePlugin(Star):
     BACKGROUND_NOTIFICATION_WATCHDOG_SECONDS: float = 90.0
     BACKGROUND_NOTIFICATION_WAIT_SECONDS: float = 95.0
     BACKGROUND_OWNER_RETRY_SECONDS: float = 10.0
+    _MEDIA_HISTORY_PRUNED_NOTE: str = (
+        "[旧媒体任务记录：更早的图片/视频生成详情已按保留上限清理]"
+    )
 
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -460,7 +463,7 @@ class GiteeAIImagePlugin(Star):
         task_id: str = "",
     ) -> None:
         """视频发送成功后写入事实记录（对齐拍照的 _append_image_history_note）。"""
-        await self._append_plugin_conversation_note(
+        await self._append_media_history_note(
             event,
             self._build_video_history_note(prompt=prompt),
             dedupe_key=f"background-video:{task_id}" if task_id else None,
@@ -488,11 +491,105 @@ class GiteeAIImagePlugin(Star):
         count: int = 1,
         dedupe_key: str | None = None,
     ) -> None:
-        await self._append_plugin_conversation_note(
+        await self._append_media_history_note(
             event,
             self._build_image_history_note(prompt=prompt, mode=mode, count=count),
             dedupe_key=dedupe_key,
         )
+
+    async def _append_media_history_note(
+        self,
+        event: AstrMessageEvent,
+        note: str,
+        *,
+        dedupe_key: str | None = None,
+    ) -> None:
+        """媒体任务记录统一入口。
+
+        保留上限为 0 时不写新记录，仅把历史中存量完整记录替换为轻量标记；
+        上限为正数时正常写入，并在同一次读-改-写中修剪超额旧记录。
+        """
+        if self._media_history_note_limit() <= 0:
+            await self._prune_media_history_notes_for_event(event)
+            return
+        await self._append_plugin_conversation_note(
+            event,
+            note,
+            dedupe_key=dedupe_key,
+            media_note=True,
+        )
+
+    def _media_history_note_limit(self) -> int:
+        config = getattr(self, "config", None)
+        if not isinstance(config, dict):
+            return 2
+        value = self._as_int(config.get("media_history_note_limit", 2), default=2)
+        return max(0, min(10, value))
+
+    @staticmethod
+    def _is_media_history_note(note: Any) -> bool:
+        text = str(note or "")
+        return "<image_history_record>" in text or "<video_history_record>" in text
+
+    def _prune_media_history_notes(self, history: list) -> int:
+        """保留最新 N 条媒体任务记录，更旧的替换为一行轻量标记。返回替换数量。"""
+        limit = self._media_history_note_limit()
+        media_indexes = [
+            index
+            for index, item in enumerate(history)
+            if isinstance(item, dict)
+            and item.get("role") == "assistant"
+            and self._is_media_history_note(item.get("content"))
+        ]
+        overflow = len(media_indexes) - max(0, limit)
+        if overflow <= 0:
+            return 0
+        replaced = 0
+        for index in media_indexes[:overflow]:
+            history[index] = {
+                "role": "assistant",
+                "content": self._MEDIA_HISTORY_PRUNED_NOTE,
+            }
+            replaced += 1
+        return replaced
+
+    async def _prune_media_history_notes_for_event(
+        self,
+        event: AstrMessageEvent,
+    ) -> int:
+        """0 档路径：不写新记录，仅清理历史中存量媒体记录（带插件内历史锁）。"""
+        lock = getattr(self, "_conversation_history_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._conversation_history_lock = lock
+        async with lock:
+            conv_mgr = getattr(self.context, "conversation_manager", None)
+            if conv_mgr is None:
+                return 0
+            conversation = await self._resolve_plugin_conversation(event)
+            if conversation is None:
+                return 0
+            history = self._parse_plugin_conversation_history(conversation)
+            replaced = self._prune_media_history_notes(history)
+            if not replaced:
+                return 0
+            try:
+                await conv_mgr.update_conversation(
+                    event.unified_msg_origin,
+                    getattr(conversation, "cid", None),
+                    history=history,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[GiteeAIImagePlugin] failed to prune media history notes: %s",
+                    exc,
+                )
+                return 0
+            try:
+                conversation.history = json.dumps(history, ensure_ascii=False)
+            except Exception:
+                pass
+            return replaced
 
     @staticmethod
     def _image_history_dedupe_key(
@@ -589,6 +686,7 @@ class GiteeAIImagePlugin(Star):
         note: str,
         *,
         dedupe_key: str | None = None,
+        media_note: bool = False,
     ) -> None:
         lock = getattr(self, "_conversation_history_lock", None)
         if lock is None:
@@ -599,6 +697,7 @@ class GiteeAIImagePlugin(Star):
                 event,
                 note,
                 dedupe_key=dedupe_key,
+                media_note=media_note,
             )
 
     async def _append_plugin_conversation_note_locked(
@@ -607,6 +706,7 @@ class GiteeAIImagePlugin(Star):
         note: str,
         *,
         dedupe_key: str | None,
+        media_note: bool = False,
     ) -> None:
         note = str(note or "").strip()
         if not note:
@@ -627,21 +727,7 @@ class GiteeAIImagePlugin(Star):
         if conversation is None:
             return
 
-        history_raw = getattr(conversation, "history", "[]")
-        if isinstance(history_raw, list):
-            history = list(history_raw)
-        else:
-            try:
-                parsed_history = json.loads(history_raw or "[]")
-                history = (
-                    list(parsed_history) if isinstance(parsed_history, list) else []
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[GiteeAIImagePlugin] failed to parse conversation history for plugin note: %s",
-                    exc,
-                )
-                history = []
+        history = self._parse_plugin_conversation_history(conversation)
 
         if any(
             isinstance(item, dict)
@@ -654,6 +740,10 @@ class GiteeAIImagePlugin(Star):
             return
 
         history.append({"role": "assistant", "content": note})
+
+        if media_note:
+            # 媒体记录在同一次读-改-写中修剪，不额外增加历史写回次数
+            self._prune_media_history_notes(history)
 
         try:
             await conv_mgr.update_conversation(
@@ -676,6 +766,21 @@ class GiteeAIImagePlugin(Star):
             conversation.history = json.dumps(history, ensure_ascii=False)
         except Exception:
             pass
+
+    @staticmethod
+    def _parse_plugin_conversation_history(conversation: Any) -> list:
+        history_raw = getattr(conversation, "history", "[]")
+        if isinstance(history_raw, list):
+            return list(history_raw)
+        try:
+            parsed_history = json.loads(history_raw or "[]")
+            return list(parsed_history) if isinstance(parsed_history, list) else []
+        except Exception as exc:
+            logger.warning(
+                "[GiteeAIImagePlugin] failed to parse conversation history for plugin note: %s",
+                exc,
+            )
+            return []
 
     async def _activate_background_manager(
         self,
