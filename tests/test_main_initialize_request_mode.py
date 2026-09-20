@@ -994,7 +994,7 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_metadata_version_is_current(self):
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-        self.assertIn("version: 1.4.3", metadata)
+        self.assertIn("version: 1.4.4", metadata)
 
     def test_aiimg_tool_description_enforces_image_mode_rules(self):
         mod, _ = _load_module()
@@ -1026,7 +1026,8 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("第 1-4 张是固定人物参考图", prompt)
         self.assertIn("第 5-6 张是本次用户附带或引用的参考图", prompt)
         self.assertIn("用户参考图不是待修改原图", prompt)
-        self.assertIn("用户要求：参考衣服和姿势", prompt)
+        self.assertIn("参考衣服和姿势", prompt)
+        self.assertNotIn("用户要求：", prompt)
 
     def test_selfie_prompt_injects_sanitized_busy_schedule_outfit_and_lighting(self):
         mod, _ = _load_module()

@@ -4817,7 +4817,7 @@ class GiteeAIImagePlugin(Star):
         filled = re.sub(r"(?m)^今日外显穿搭：\s*$\n?", "", filled).strip()
         if not filled:
             return user_prompt
-        return f"{filled}\n\n用户要求：{user_prompt}" if user_prompt else filled
+        return f"{filled}\n\n{user_prompt}" if user_prompt else filled
 
     def _parse_video_args(self, text: str) -> tuple[str | None, str]:
         """解析 /视频 参数，返回 (preset, prompt)
@@ -6026,7 +6026,7 @@ class GiteeAIImagePlugin(Star):
         else:
             reference_note = f"图片顺序：第 1-{reference_count} 张均为固定人物参考图。"
         prefix = "\n".join(line.rstrip() for line in prefix.splitlines()).strip()
-        sections = [part for part in (prefix, reference_note, f"用户要求：{user_prompt}") if part]
+        sections = [part for part in (prefix, reference_note, user_prompt) if part]
         return "\n\n".join(sections)
 
     def _merge_selfie_chain_with_edit_chain(
