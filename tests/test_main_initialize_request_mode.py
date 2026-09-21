@@ -710,7 +710,7 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
 
         async def missing_reference(event, prompt, backend, **kwargs):
             selfie_attempts.append((prompt, backend))
-            raise RuntimeError("未设置自拍参考照")
+            raise RuntimeError("未设置拍照参考图")
 
         plugin._begin_user_job = begin
         plugin._end_user_job = end
@@ -727,8 +727,8 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(selfie_attempts), 2)
         self.assertEqual(len(failures), 2)
-        self.assertIn("自拍参考照缺失", default_result.content[0].text)
-        self.assertIn("自拍参考照缺失", auto_result.content[0].text)
+        self.assertIn("拍照参考图缺失", default_result.content[0].text)
+        self.assertIn("拍照参考图缺失", auto_result.content[0].text)
         self.assertNotIn("RuntimeError", default_result.content[0].text)
 
     async def test_aiimg_generate_explicit_text_respects_llm_draw_switch(self):
@@ -994,7 +994,7 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_metadata_version_is_current(self):
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-        self.assertIn("version: 1.4.4", metadata)
+        self.assertIn("version: 1.4.5", metadata)
 
     def test_aiimg_tool_description_enforces_image_mode_rules(self):
         mod, _ = _load_module()
@@ -1004,10 +1004,11 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(summary.strip()), 40)
         self.assertIn("edit 禁止自行使用", parameters)
         self.assertIn("没有可编辑图片时不得使用", parameters)
-        self.assertIn("不局限于露脸自拍", parameters)
-        self.assertIn("第一人称拍摄", parameters)
+        self.assertIn("自拍、日常拍照分享都可以", parameters)
+        self.assertIn("不要在 prompt 里描述人物长相", parameters)
+        self.assertIn("参考图缺失时报告失败，不得降级", parameters)
         self.assertIn("text 不允许自行使用", parameters)
-        self.assertIn("不得写得过度暴露或违规", parameters)
+        self.assertNotIn("过度暴露", parameters)
 
     def test_selfie_prompt_describes_fixed_and_user_reference_ranges(self):
         mod, _ = _load_module()

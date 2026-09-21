@@ -387,23 +387,24 @@ class GiteeAIImagePlugin(Star):
         if not previous_prompt:
             return current_prompt
         if not current_prompt:
-            return f"延续上一张自拍要求：{previous_prompt}"
-        return f"延续上一张自拍要求：{previous_prompt}；本次新增要求：{current_prompt}"
+            return f"延续上一张照片要求：{previous_prompt}"
+        return f"延续上一张照片要求：{previous_prompt}；本次新增要求：{current_prompt}"
 
     @staticmethod
     def _normalize_llm_image_mode(mode: Any) -> str:
-        """Normalize LLM requests while keeping selfie_ref as the safe default."""
-        value = str(mode or "selfie_ref").strip().lower()
+        """Normalize LLM requests while keeping photo (selfie_ref) as the safe default."""
+        value = str(mode or "photo").strip().lower()
         if value in {"text", "draw", "txt"}:
             return "text"
         if value in {"edit", "img2img", "aiedit"}:
             return "edit"
+        # photo/拍照 为对外口径，selfie_ref/selfie/ref 为旧值兼容，其余一律兜底为拍照模式
         return "selfie_ref"
 
     @staticmethod
     def _normalize_image_history_mode(mode: Any) -> str:
         value = str(mode or "").strip().lower()
-        if value in {"selfie_ref", "selfie", "ref"}:
+        if value in {"selfie_ref", "selfie", "ref", "photo", "拍照"}:
             return "selfie_ref"
         if value in {"edit", "img2img", "aiedit"}:
             return "edit"
@@ -415,7 +416,7 @@ class GiteeAIImagePlugin(Star):
 
     @staticmethod
     def _is_missing_selfie_reference_error(error: Exception) -> bool:
-        return "自拍参考照" in str(error or "")
+        return "拍照参考图" in str(error or "") or "自拍参考照" in str(error or "")
 
     @staticmethod
     def _clean_image_history_prompt(prompt: Any) -> str:
@@ -1583,7 +1584,7 @@ class GiteeAIImagePlugin(Star):
 
     @staticmethod
     def _selfie_disabled_message() -> str:
-        return "自拍参考图模式已关闭（features.selfie.enabled=false）"
+        return "拍照参考图模式已关闭（features.selfie.enabled=false）"
 
     def _get_busy_schedule_media_recorder(self, event: AstrMessageEvent):
         return _resolve_busy_schedule_media_recorder(event, self.context)
@@ -2825,7 +2826,7 @@ class GiteeAIImagePlugin(Star):
         self,
         event: AstrMessageEvent,
         prompt: str,
-        mode: str = "selfie_ref",
+        mode: str = "photo",
         backend: str = "auto",
         output: str = "",
         count: int = 1,
@@ -2833,8 +2834,8 @@ class GiteeAIImagePlugin(Star):
         """按用户要求生成、批量生成或编辑图片。
 
         Args:
-            prompt(string): 完整的生成或修改要求。使用合规、克制的描述，不得写得过度暴露或违规，否则会审核失败。自拍模式可描述第一人称正在拍摄的画面，不强制露脸。
-            mode(string): 默认 selfie_ref。selfie_ref 是自拍模式，但不局限于露脸自拍，也不要求出现脸或完整身体；第一人称拍摄眼前或手中食物、物品、环境等日常所见仍属于自拍，不要因未露脸改用文生图。省略 mode 或传 auto 均按 selfie_ref。自拍参考图缺失时报告失败，不得降级。edit 禁止自行使用，仅当用户明确要求修改其发送或引用的现有图片且提出具体修改时使用；没有明确要求或没有可编辑图片时不得使用。text 不允许自行使用，仅当用户明确要求文生图时使用。
+            prompt(string): 完整的生成或修改要求。可描述第一人称正在拍摄的画面，不强制露脸。
+            mode(string): 默认 photo。photo 是拍照模式：自拍、日常拍照分享都可以。不要在 prompt 里描述人物长相，系统会自动附上参考图。省略 mode 或传 auto 均按 photo。参考图缺失时报告失败，不得降级。edit 禁止自行使用，仅当用户明确要求修改其发送或引用的现有图片且提出具体修改时使用；没有明确要求或没有可编辑图片时不得使用。text 不允许自行使用，仅当用户明确要求文生图时使用。
             backend(string): auto=使用配置的服务商链；也可指定 provider_id。
             output(string): 可选输出尺寸或分辨率，例如 2048x2048 或 4K。
             count(number): 默认只能生成 1 张；只有用户明确说“生很多张”等批量要求时，才能设置为 2 至配置上限，不要自行开启批量。
@@ -2888,7 +2889,7 @@ class GiteeAIImagePlugin(Star):
                 await self._signal_llm_tool_failure(event)
                 if self._is_missing_selfie_reference_error(exc):
                     return self._llm_tool_text_result(
-                        "自拍参考照缺失，本次没有提交后台任务，也没有降级为文生图。"
+                        "拍照参考图缺失，本次没有提交后台任务，也没有降级为文生图。"
                     )
                 return self._llm_tool_text_result(
                     "The image request could not be prepared and was not submitted."
@@ -2978,7 +2979,7 @@ class GiteeAIImagePlugin(Star):
                     )
                     await self._signal_llm_tool_failure(event)
                     return self._llm_tool_text_result(
-                        "The requested selfie image tool is disabled by plugin configuration."
+                        "The requested photo tool is disabled by plugin configuration."
                     )
                 if not self._is_selfie_llm_enabled():
                     logger.warning(
@@ -2986,7 +2987,7 @@ class GiteeAIImagePlugin(Star):
                     )
                     await self._signal_llm_tool_failure(event)
                     return self._llm_tool_text_result(
-                        "The requested selfie image tool is disabled by plugin configuration."
+                        "The requested photo tool is disabled by plugin configuration."
                     )
                 image_path, task_meta = await self._generate_selfie_image_with_meta(
                     event,
@@ -3055,7 +3056,7 @@ class GiteeAIImagePlugin(Star):
                     "The requested image generation tool is disabled by plugin configuration."
                 )
             if not prompt:
-                prompt = "a selfie photo"
+                prompt = "a casual photo"
 
             logger.info("[aiimg_generate] route=draw")
             draw_conf = self._get_feature("draw")
@@ -3087,7 +3088,7 @@ class GiteeAIImagePlugin(Star):
             await self._signal_llm_tool_failure(event)
             if self._is_missing_selfie_reference_error(e):
                 return self._llm_tool_text_result(
-                    "自拍参考照缺失，本次没有生成图片，也没有降级为文生图。"
+                    "拍照参考图缺失，本次没有生成图片，也没有降级为文生图。"
                 )
             return self._llm_tool_text_result(
                 "The image request failed and has ended. Do not retry automatically unless the user explicitly asks."
@@ -3142,7 +3143,7 @@ class GiteeAIImagePlugin(Star):
             if not self._is_selfie_enabled() or not self._is_selfie_llm_enabled():
                 await self._signal_llm_tool_failure(event)
                 return self._llm_tool_text_result(
-                    "The requested batch selfie image tool is disabled by plugin configuration."
+                    "The requested batch photo tool is disabled by plugin configuration."
                 )
 
         message_id = (
@@ -3463,12 +3464,12 @@ class GiteeAIImagePlugin(Star):
     ) -> tuple[list[bytes], str, dict[str, Any], dict[str, Any]]:
         conf = self._get_selfie_conf()
         if not self._is_selfie_enabled() or not self._is_selfie_llm_enabled():
-            raise RuntimeError("The requested selfie image tool is disabled.")
+            raise RuntimeError("The requested photo tool is disabled.")
         ref_paths, ref_source = await self._get_selfie_reference_paths(event)
         ref_images = await self._read_paths_bytes(ref_paths)
         if not ref_images:
             raise RuntimeError(
-                "未设置自拍参考照。请先发送图片并设置自拍参考，或在 WebUI 上传参考图。"
+                "未设置拍照参考图。请先发送图片并设置拍照参考，或在 WebUI 上传参考图。"
             )
         extra_segs = await get_images_from_event(event, include_avatar=False)
         extra_bytes = await self._image_segs_to_bytes(extra_segs)
@@ -4711,7 +4712,7 @@ class GiteeAIImagePlugin(Star):
                 return f"改图预设/{spec.preset_name}"
             return "改图"
         if spec.mode == "selfie_ref":
-            return "自拍"
+            return "拍照"
         return spec.mode
 
     def _get_batch_concurrency_for_mode(self, mode: str) -> int:
@@ -5989,10 +5990,10 @@ class GiteeAIImagePlugin(Star):
         prefix = str(conf.get("prompt_prefix", "") or "").strip()
         if not prefix:
             prefix = (
-                "请根据参考图生成一张新的自拍照：\n"
+                "请根据参考图拍摄一张新的照片：\n"
                 "1) 以固定人物参考图的人脸身份为准，保持五官和气质一致。\n"
                 "2) 本次用户参考图仅用于用户指定的服装、姿势、构图或场景。\n"
-                "3) 输出一张高质量照片风格自拍，不要拼图，不要水印。\n"
+                "3) 输出一张高质量的照片，不要拼图，不要水印。\n"
                 "今日外显穿搭：{today_outfit}\n"
                 "当前时间光线：{lighting}"
             )
@@ -6008,7 +6009,7 @@ class GiteeAIImagePlugin(Star):
         if not has_lighting_placeholder:
             prefix = f"{prefix}\n当前时间光线：{lighting}"
         prefix = self._expand_time_placeholders(prefix)
-        user_prompt = self._expand_time_placeholders(user_prompt or "日常自拍照")
+        user_prompt = self._expand_time_placeholders(user_prompt or "日常照片")
         reference_count = max(0, int(reference_count or 0))
         extra_reference_count = max(0, int(extra_reference_count or 0))
         if extra_reference_count > 0:
@@ -6074,7 +6075,7 @@ class GiteeAIImagePlugin(Star):
         ref_images = await self._read_paths_bytes(ref_paths)
         if not ref_images:
             raise RuntimeError(
-                "未设置自拍参考照。请先：发送图片 + /自拍参考 设置，或在 WebUI 配置 features.selfie.reference_images 上传。"
+                "未设置拍照参考图。请先：发送图片 + /自拍参考 设置，或在 WebUI 配置 features.selfie.reference_images 上传。"
             )
 
         # 2) 读取额外参考图（衣服/姿势/场景）
