@@ -1177,6 +1177,14 @@ class GiteeAIImagePlugin(Star):
                 return False
         return default
 
+    def _feature_prompt_prefix(self, conf: Any) -> str:
+        """分组前缀模板；prompt_prefix_enabled=false 时返回空串（模板配置保留）。"""
+        if not isinstance(conf, dict) or not self._as_bool(
+            conf.get("prompt_prefix_enabled", True), default=True
+        ):
+            return ""
+        return str(conf.get("prompt_prefix", "") or "").strip()
+
     def _patch_tool_image_cache_runtime(self) -> None:
         try:
             from astrbot.core.agent import tool_image_cache as cache_module
@@ -3062,7 +3070,7 @@ class GiteeAIImagePlugin(Star):
             draw_conf = self._get_feature("draw")
             original_prompt = prompt
             draw_prefix = self._expand_time_placeholders(
-                str(draw_conf.get("prompt_prefix") or "").strip()
+                self._feature_prompt_prefix(draw_conf)
             )
             if draw_prefix:
                 prompt = f"{draw_prefix}\n\n{prompt}"
@@ -3587,7 +3595,7 @@ class GiteeAIImagePlugin(Star):
             resolved_mode = "draw"
             user_prompt = prompt or "a photo"
             prefix = self._expand_time_placeholders(
-                str(draw_conf.get("prompt_prefix") or "").strip()
+                self._feature_prompt_prefix(draw_conf)
             )
             effective_prompt = f"{prefix}\n\n{user_prompt}" if prefix else user_prompt
             task_meta = self._build_image_task_meta(
@@ -3836,7 +3844,7 @@ class GiteeAIImagePlugin(Star):
     ) -> PreparedImageJob:
         if job.mode == "draw":
             prefix = self._expand_time_placeholders(
-                str(self._get_feature("draw").get("prompt_prefix") or "").strip()
+                self._feature_prompt_prefix(self._get_feature("draw"))
             )
             effective_prompt = f"{prefix}\n\n{prompt}" if prefix else prompt
             task_meta = self._build_image_task_meta(
@@ -4796,6 +4804,13 @@ class GiteeAIImagePlugin(Star):
         """
         user_prompt, outfit = self._prepare_selfie_prompt_context(prompt or "")
         user_prompt = self._expand_time_placeholders(user_prompt or "")
+        if not self._as_bool(
+            self._get_feature("video").get("prompt_prefix_enabled", True),
+            default=True,
+        ):
+            # 前缀开关关闭：自定义模板与内置默认都不使用，模板配置保留
+            # （穿搭剥离与占位符扩展仍作用于用户提示词本身）
+            return user_prompt
         prefix = str(
             self._get_feature("video").get("prompt_prefix", "") or ""
         ).strip()
@@ -5987,28 +6002,34 @@ class GiteeAIImagePlugin(Star):
         control_text: str = "",
     ) -> str:
         conf = self._get_selfie_conf()
-        prefix = str(conf.get("prompt_prefix", "") or "").strip()
-        if not prefix:
-            prefix = (
-                "请根据参考图拍摄一张新的照片：\n"
-                "1) 以固定人物参考图的人脸身份为准，保持五官和气质一致。\n"
-                "2) 本次用户参考图仅用于用户指定的服装、姿势、构图或场景。\n"
-                "3) 输出一张高质量的照片，不要拼图，不要水印。\n"
-                "今日外显穿搭：{today_outfit}\n"
-                "当前时间光线：{lighting}"
-            )
+        prefix_enabled = self._as_bool(
+            conf.get("prompt_prefix_enabled", True), default=True
+        )
+        prefix = ""
+        if prefix_enabled:
+            prefix = str(conf.get("prompt_prefix", "") or "").strip()
+            if not prefix:
+                prefix = (
+                    "请根据参考图拍摄一张新的照片：\n"
+                    "1) 以固定人物参考图的人脸身份为准，保持五官和气质一致。\n"
+                    "2) 本次用户参考图仅用于用户指定的服装、姿势、构图或场景。\n"
+                    "3) 输出一张高质量的照片，不要拼图，不要水印。\n"
+                    "今日外显穿搭：{today_outfit}\n"
+                    "当前时间光线：{lighting}"
+                )
 
         user_prompt, outfit = self._prepare_selfie_prompt_context(prompt, control_text)
-        has_outfit_placeholder = "{today_outfit}" in prefix
-        has_lighting_placeholder = "{lighting}" in prefix
-        prefix = prefix.replace("{today_outfit}", outfit)
-        lighting = self._resolve_lighting_placeholder()
-        prefix = prefix.replace("{lighting}", lighting)
-        if outfit and not has_outfit_placeholder:
-            prefix = f"{prefix}\n今日外显穿搭：{outfit}"
-        if not has_lighting_placeholder:
-            prefix = f"{prefix}\n当前时间光线：{lighting}"
-        prefix = self._expand_time_placeholders(prefix)
+        if prefix_enabled:
+            has_outfit_placeholder = "{today_outfit}" in prefix
+            has_lighting_placeholder = "{lighting}" in prefix
+            prefix = prefix.replace("{today_outfit}", outfit)
+            lighting = self._resolve_lighting_placeholder()
+            prefix = prefix.replace("{lighting}", lighting)
+            if outfit and not has_outfit_placeholder:
+                prefix = f"{prefix}\n今日外显穿搭：{outfit}"
+            if not has_lighting_placeholder:
+                prefix = f"{prefix}\n当前时间光线：{lighting}"
+            prefix = self._expand_time_placeholders(prefix)
         user_prompt = self._expand_time_placeholders(user_prompt or "日常照片")
         reference_count = max(0, int(reference_count or 0))
         extra_reference_count = max(0, int(extra_reference_count or 0))

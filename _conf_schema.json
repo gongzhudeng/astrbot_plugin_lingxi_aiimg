@@ -117,6 +117,12 @@
             "description": "文生图提示词前缀",
             "hint": "会自动拼接到 AI 生成的提示词前面。适合写风格描述、画质要求等通用内容。留空则不添加。支持占位符：{now}=当前日期时间、{date}=当前日期、{time}=当前时间、{weekday}=星期几。",
             "default": ""
+          },
+          "prompt_prefix_enabled": {
+            "type": "bool",
+            "description": "启用文生图提示词前缀",
+            "hint": "关闭后前缀模板不生效但不删除，随时重新打开即可恢复。",
+            "default": true
           }
         }
       },
@@ -265,7 +271,13 @@
             "type": "text",
             "description": "自拍提示词前缀",
             "hint": "留空使用内置默认。支持占位符：{now}=当前日期时间、{date}=当前日期、{time}=当前时间、{weekday}=星期几、{today_outfit}=忙碌日程插件的今日外显穿搭（自动剔除内衣/内裤）、{lighting}=按当前时间规则生成的光线描述。建议将 {today_outfit} 和 {lighting} 写入此前缀。",
-            "default": "请根据参考图生成一张新的自拍照。\n今日外显穿搭：{today_outfit}\n当前时间光线：{lighting}"
+            "default": "请根据参考图拍摄一张新的照片。\n今日外显穿搭：{today_outfit}\n当前时间光线：{lighting}"
+          },
+          "prompt_prefix_enabled": {
+            "type": "bool",
+            "description": "启用自拍提示词前缀",
+            "hint": "关闭后前缀模板（含内置默认与穿搭/光线注入）不生效但不删除，随时重新打开即可恢复。参考图仍会正常附上。",
+            "default": true
           },
           "today_outfit_enabled": {
             "type": "bool",
@@ -341,6 +353,12 @@
             "description": "视频提示词前缀",
             "hint": "留空使用内置默认。支持占位符：{now}=当前日期时间、{date}=当前日期、{time}=当前时间、{weekday}=星期几、{today_outfit}=忙碌日程插件的今日外显穿搭（自动剔除内衣/内裤）、{lighting}=按当前时间规则生成的光线描述。穿搭与自拍（生图）共用同一套临时穿搭检测关键词与控制词：提示词出现服装词时今日穿搭自动留空。",
             "default": "真实生活感随手拍视频，手机手持拍摄质感，高清写实。\n今日外显穿搭：{today_outfit}\n当前时间光线：{lighting}"
+          },
+          "prompt_prefix_enabled": {
+            "type": "bool",
+            "description": "启用视频提示词前缀",
+            "hint": "关闭后前缀模板（含内置默认与穿搭/光线注入）不生效但不删除，随时重新打开即可恢复。",
+            "default": true
           },
           "send_mode": {
             "type": "string",
