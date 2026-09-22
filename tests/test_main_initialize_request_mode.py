@@ -994,7 +994,7 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_metadata_version_is_current(self):
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-        self.assertIn("version: 1.4.7", metadata)
+        self.assertIn("version: 1.4.8", metadata)
 
     def test_aiimg_tool_description_enforces_image_mode_rules(self):
         mod, _ = _load_module()
@@ -1010,23 +1010,19 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("text 不允许自行使用", parameters)
         self.assertNotIn("过度暴露", parameters)
 
-    def test_selfie_prompt_describes_fixed_and_user_reference_ranges(self):
+    def test_selfie_prompt_reference_note_removed(self):
         mod, _ = _load_module()
         plugin = mod.GiteeAIImagePlugin(
             context=types.SimpleNamespace(),
             config={"features": {"selfie": {"prompt_prefix": "固定图逐张规则"}}},
         )
 
-        prompt = plugin._build_selfie_prompt(
-            "参考衣服和姿势",
-            reference_count=4,
-            extra_reference_count=2,
-        )
+        prompt = plugin._build_selfie_prompt("参考衣服和姿势")
 
         self.assertIn("固定图逐张规则", prompt)
-        self.assertIn("第 1-4 张是固定人物参考图", prompt)
-        self.assertIn("第 5-6 张是本次用户附带或引用的参考图", prompt)
-        self.assertIn("用户参考图不是待修改原图", prompt)
+        self.assertNotIn("图片顺序", prompt)
+        self.assertNotIn("固定人物参考图", prompt)
+        self.assertNotIn("用户参考图不是待修改原图", prompt)
         self.assertIn("参考衣服和姿势", prompt)
         self.assertNotIn("用户要求：", prompt)
 
@@ -1034,7 +1030,7 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         mod, _ = _load_module()
         context = types.SimpleNamespace(_busy_schedule_outfit="内衣：黑色\n内裤：黑色\n上装：白色衬衫\n下装：蓝色短裙")
         plugin = mod.GiteeAIImagePlugin(context=context, config={"features": {"selfie": {"prompt_prefix": "{today_outfit} | {lighting}", "lighting_rules": ["00:00-24:00=测试光线"]}}})
-        prompt = plugin._build_selfie_prompt("窗边自拍", reference_count=1, extra_reference_count=0)
+        prompt = plugin._build_selfie_prompt("窗边自拍")
         self.assertIn("白色衬衫", prompt)
         self.assertIn("蓝色短裙", prompt)
         self.assertNotIn("内衣", prompt)
@@ -1046,28 +1042,25 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         context = types.SimpleNamespace(_busy_schedule_outfit="上装：白衬衫")
         config = {"features": {"selfie": {"prompt_prefix": "穿搭：{today_outfit}", "lighting_rules": ["00:00-24:00=光线"]}}}
         plugin = mod.GiteeAIImagePlugin(context=context, config=config)
-        temporary = plugin._build_selfie_prompt("穿黑色短裙自拍", reference_count=1, extra_reference_count=0)
+        temporary = plugin._build_selfie_prompt("穿黑色短裙自拍")
         self.assertNotIn("白衬衫", temporary)
         self.assertIn("黑色短裙", temporary)
-        forced = plugin._build_selfie_prompt("强制使用今日穿搭，拍腿部特写", reference_count=1, extra_reference_count=0)
+        forced = plugin._build_selfie_prompt("强制使用今日穿搭，拍腿部特写")
         self.assertIn("白衬衫", forced)
         self.assertNotIn("强制使用今日穿搭", forced)
 
-    def test_selfie_prompt_without_user_reference_keeps_fixed_range(self):
+    def test_selfie_prompt_without_reference_note(self):
         mod, _ = _load_module()
         plugin = mod.GiteeAIImagePlugin(
             context=types.SimpleNamespace(),
             config={"features": {"selfie": {"prompt_prefix": "固定图规则"}}},
         )
 
-        prompt = plugin._build_selfie_prompt(
-            "夜间自拍",
-            reference_count=4,
-            extra_reference_count=0,
-        )
+        prompt = plugin._build_selfie_prompt("夜间自拍")
 
-        self.assertIn("第 1-4 张均为固定人物参考图", prompt)
+        self.assertNotIn("第 1-4 张", prompt)
         self.assertNotIn("本次用户附带或引用", prompt)
+        self.assertIn("夜间自拍", prompt)
 
 
 if __name__ == "__main__":

@@ -1178,12 +1178,15 @@ class GiteeAIImagePlugin(Star):
         return default
 
     def _feature_prompt_prefix(self, conf: Any) -> str:
-        """分组前缀模板；prompt_prefix_enabled=false 时返回空串（模板配置保留）。"""
+        """分组前缀模板；prompt_prefix_enabled=false 时返回空串（模板配置保留）。
+
+        拼接规则：代码不附加任何换行；模板里书写的字面 \\n 会被翻译成真实换行。
+        """
         if not isinstance(conf, dict) or not self._as_bool(
             conf.get("prompt_prefix_enabled", True), default=True
         ):
             return ""
-        return str(conf.get("prompt_prefix", "") or "").strip()
+        return str(conf.get("prompt_prefix", "") or "").strip().replace("\\n", "\n")
 
     def _patch_tool_image_cache_runtime(self) -> None:
         try:
@@ -3073,7 +3076,7 @@ class GiteeAIImagePlugin(Star):
                 self._feature_prompt_prefix(draw_conf)
             )
             if draw_prefix:
-                prompt = f"{draw_prefix}\n\n{prompt}"
+                prompt = f"{draw_prefix}{prompt}"
             image_path = await self.draw.generate(
                 prompt,
                 provider_id=target_backend,
@@ -3486,8 +3489,6 @@ class GiteeAIImagePlugin(Star):
         )
         effective_prompt = self._build_selfie_prompt(
             effective_user_prompt,
-            reference_count=len(ref_images),
-            extra_reference_count=len(extra_bytes),
             control_text=str(getattr(event, "message_str", "") or ""),
         )
 
@@ -3597,7 +3598,7 @@ class GiteeAIImagePlugin(Star):
             prefix = self._expand_time_placeholders(
                 self._feature_prompt_prefix(draw_conf)
             )
-            effective_prompt = f"{prefix}\n\n{user_prompt}" if prefix else user_prompt
+            effective_prompt = f"{prefix}{user_prompt}" if prefix else user_prompt
             task_meta = self._build_image_task_meta(
                 mode="text",
                 user_prompt=user_prompt,
@@ -3846,7 +3847,7 @@ class GiteeAIImagePlugin(Star):
             prefix = self._expand_time_placeholders(
                 self._feature_prompt_prefix(self._get_feature("draw"))
             )
-            effective_prompt = f"{prefix}\n\n{prompt}" if prefix else prompt
+            effective_prompt = f"{prefix}{prompt}" if prefix else prompt
             task_meta = self._build_image_task_meta(
                 mode="text",
                 user_prompt=prompt,
@@ -3857,10 +3858,6 @@ class GiteeAIImagePlugin(Star):
         elif job.mode == "selfie_ref":
             effective_prompt = self._build_selfie_prompt(
                 prompt,
-                reference_count=int(job.options.get("reference_count") or 0),
-                extra_reference_count=int(
-                    job.options.get("extra_reference_count") or 0
-                ),
                 control_text=str(job.options.get("control_text") or ""),
             )
             task_meta = self._build_image_task_meta(
@@ -4801,6 +4798,9 @@ class GiteeAIImagePlugin(Star):
         （today_outfit_enabled、outfit_force/skip/auto_keywords）：
         提示词里出现临时穿搭词时今日穿搭自动留空；
         控制词会从提示词中剥离，不会传给视频模型。
+
+        前缀与正文直连拼接，代码不附加任何换行；
+        模板里的字面 \\n 会被翻译成真实换行，接缝间隔完全由模板控制。
         """
         user_prompt, outfit = self._prepare_selfie_prompt_context(prompt or "")
         user_prompt = self._expand_time_placeholders(user_prompt or "")
@@ -4818,7 +4818,7 @@ class GiteeAIImagePlugin(Star):
             prefix = (
                 "真实生活感随手拍视频，手机手持拍摄质感，高清写实。\n"
                 "今日外显穿搭：{today_outfit}\n"
-                "当前时间光线：{lighting}"
+                "当前时间光线：{lighting}\\n"
             )
         has_outfit_placeholder = "{today_outfit}" in prefix
         has_lighting_placeholder = "{lighting}" in prefix
@@ -4831,9 +4831,11 @@ class GiteeAIImagePlugin(Star):
         filled = self._expand_time_placeholders(filled)
         # 穿搭留空时清掉空值标签行，避免空"今日外显穿搭："标签送进视频模型
         filled = re.sub(r"(?m)^今日外显穿搭：\s*$\n?", "", filled).strip()
+        # 代码不附加任何换行：模板里的字面 \n 在此翻译成真实换行，接缝由模板自控
+        filled = filled.replace("\\n", "\n")
         if not filled:
             return user_prompt
-        return f"{filled}\n\n{user_prompt}" if user_prompt else filled
+        return f"{filled}{user_prompt}" if user_prompt else filled
 
     def _parse_video_args(self, text: str) -> tuple[str | None, str]:
         """解析 /视频 参数，返回 (preset, prompt)
@@ -5997,8 +5999,6 @@ class GiteeAIImagePlugin(Star):
         self,
         prompt: str,
         *,
-        reference_count: int,
-        extra_reference_count: int,
         control_text: str = "",
     ) -> str:
         conf = self._get_selfie_conf()
@@ -6015,7 +6015,7 @@ class GiteeAIImagePlugin(Star):
                     "2) 本次用户参考图仅用于用户指定的服装、姿势、构图或场景。\n"
                     "3) 输出一张高质量的照片，不要拼图，不要水印。\n"
                     "今日外显穿搭：{today_outfit}\n"
-                    "当前时间光线：{lighting}"
+                    "当前时间光线：{lighting}\\n"
                 )
 
         user_prompt, outfit = self._prepare_selfie_prompt_context(prompt, control_text)
@@ -6031,25 +6031,11 @@ class GiteeAIImagePlugin(Star):
                 prefix = f"{prefix}\n当前时间光线：{lighting}"
             prefix = self._expand_time_placeholders(prefix)
         user_prompt = self._expand_time_placeholders(user_prompt or "日常照片")
-        reference_count = max(0, int(reference_count or 0))
-        extra_reference_count = max(0, int(extra_reference_count or 0))
-        if extra_reference_count > 0:
-            extra_start = reference_count + 1
-            extra_end = reference_count + extra_reference_count
-            if extra_start == extra_end:
-                extra_range = f"第 {extra_start} 张"
-            else:
-                extra_range = f"第 {extra_start}-{extra_end} 张"
-            reference_note = (
-                f"图片顺序：第 1-{reference_count} 张是固定人物参考图；"
-                f"{extra_range}是本次用户附带或引用的参考图。"
-                "用户参考图不是待修改原图，只参考用户要求中明确指定的服装、姿势、构图或场景。"
-            )
-        else:
-            reference_note = f"图片顺序：第 1-{reference_count} 张均为固定人物参考图。"
         prefix = "\n".join(line.rstrip() for line in prefix.splitlines()).strip()
-        sections = [part for part in (prefix, reference_note, user_prompt) if part]
-        return "\n\n".join(sections)
+        # 代码不附加任何换行：模板里的字面 \n 在此翻译成真实换行，接缝由模板自控
+        prefix = prefix.replace("\\n", "\n")
+        sections = [part for part in (prefix, user_prompt) if part]
+        return "".join(sections)
 
     def _merge_selfie_chain_with_edit_chain(
         self, selfie_chain: list[object]
@@ -6111,8 +6097,6 @@ class GiteeAIImagePlugin(Star):
         )
         final_prompt = self._build_selfie_prompt(
             effective_user_prompt,
-            reference_count=len(ref_images),
-            extra_reference_count=len(extra_bytes),
             control_text=str(getattr(event, "message_str", "") or ""),
         )
 
