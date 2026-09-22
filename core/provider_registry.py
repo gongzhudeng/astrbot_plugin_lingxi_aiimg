@@ -6,6 +6,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .comfyui_local_backend import ComfyUILocalBackend
 from .gemini_edit import GeminiEditBackend
 from .gemini_flow2api import Flow2ApiVideoBackend, GeminiFlow2ApiBackend
 from .gitee_edit import GiteeEditBackend
@@ -44,6 +45,8 @@ def _is_http_url(value: Any) -> bool:
 
 
 _TEMPLATE_KEY_ALIASES: dict[str, str] = {
+    "comfyui": "comfyui_local",
+    "comfyui_local": "comfyui_local",
     "gitee": "gitee_images",
     "grok": "grok_images",
     "grok2api": "grok2api_images",
@@ -315,6 +318,9 @@ class ProviderRegistry:
                 )
 
             # Minimal required fields per provider type.
+            if template_key == "comfyui_local":
+                if not str(item.get("base_url") or "").strip():
+                    errors.append(f"provider '{provider_id}' missing base_url")
             if template_key in {
                 "openai_images",
                 "grok_images",
@@ -443,6 +449,18 @@ class ProviderRegistry:
         return backend
 
     def _build_backend(self, pid: str, template_key: str, conf: dict) -> object:
+        if template_key == "comfyui_local":
+            return ComfyUILocalBackend(
+                imgr=self._imgr,
+                settings={
+                    "base_url": str(conf.get("base_url") or "http://127.0.0.1:8200").strip(),
+                    "timeout": int(conf.get("timeout") or 900),
+                    "poll_interval": float(conf.get("poll_interval") or 2),
+                    "default_size": str(conf.get("default_size") or "768x1024").strip(),
+                    "drop_reference_images": bool(conf.get("drop_reference_images", False)),
+                },
+            )
+
         if template_key == "gemini_native":
             settings = {
                 "api_url": conf.get("api_url"),
