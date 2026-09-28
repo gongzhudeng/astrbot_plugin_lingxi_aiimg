@@ -5941,6 +5941,57 @@ class GiteeAIImagePlugin(Star):
             str(getattr(self.context, "_busy_schedule_outfit", "") or "").strip()
         )
 
+    def _current_now_minutes(self) -> int:
+        from datetime import datetime
+
+        now = datetime.now()
+        return now.hour * 60 + now.minute
+
+    def _resolve_outfit_time_rules(self) -> str:
+        """分时段穿搭兜底：HH:MM-HH:MM=穿搭描述，支持跨午夜（如 22:30-06:30=睡衣）。
+
+        命中返回规则值（用户显式配置的最终值，不做内衣剥离）；
+        未命中或规则无效返回空串，由调用方回落到今日穿搭。
+        """
+        conf = self._get_selfie_conf()
+        rules = conf.get("outfit_time_rules", [])
+        if not isinstance(rules, list):
+            return ""
+        now_minutes = self._current_now_minutes()
+        for item in rules:
+            text = str(item or "").strip()
+            if "=" not in text or "-" not in text:
+                continue
+            span, value = text.split("=", 1)
+            if not value.strip():
+                continue
+            try:
+                start_text, end_text = span.strip().split("-", 1)
+                sh, sm = (int(part) for part in start_text.strip().split(":", 1))
+                eh, em = (int(part) for part in end_text.strip().split(":", 1))
+                start, end = sh * 60 + sm, eh * 60 + em
+            except (ValueError, TypeError):
+                continue
+            if end == 0:  # "22:30-00:00" 的结束端按午夜 24:00 处理
+                end = 1440
+            if not (0 <= start < 1440 and 0 < end <= 1440):
+                continue
+            if end == 1440:
+                matched = now_minutes >= start
+            else:
+                matched = start <= now_minutes < end if start < end else now_minutes >= start or now_minutes < end
+            if matched:
+                return value.strip()
+        return ""
+
+    def _resolve_outfit_value(self, forced: bool = False) -> str:
+        """{today_outfit} 的最终取值：时间规则命中优先，"沿用今日穿搭"控制词除外。"""
+        if not forced:
+            rule_value = self._resolve_outfit_time_rules()
+            if rule_value:
+                return rule_value
+        return self._get_busy_schedule_outfit()
+
     def _resolve_lighting_placeholder(self) -> str:
         from datetime import datetime
         conf = self._get_selfie_conf()
@@ -5985,15 +6036,17 @@ class GiteeAIImagePlugin(Star):
         skip = self._split_config_keywords(conf.get("outfit_skip_keywords"), ("不要使用今日穿搭", "不要使用今天的穿搭", "不使用今日穿搭", "不使用今天的穿搭"))
         auto = self._split_config_keywords(conf.get("outfit_auto_keywords"), ("裙子", "短裙", "长裙", "半身裙", "连衣裙", "裤子", "短裤", "长裤", "牛仔裤", "上衣", "外套", "衬衫", "针织衫", "卫衣", "夹克", "袜子", "鞋子", "靴子", "帽子", "围巾", "配饰", "服装", "衣服", "换装", "穿搭", "outfit", "dress", "skirt", "pants", "shirt", "jacket"))
         use_outfit = bool(conf.get("today_outfit_enabled", True))
+        forced = False
         explicit_source = f"{control_text}\n{current}"
         if self._contains_keyword(explicit_source, force):
             use_outfit = True
+            forced = True
         elif self._contains_keyword(explicit_source, skip) or self._contains_keyword(current, auto):
             use_outfit = False
         cleaned = current
         for control in tuple(dict.fromkeys((*force, *skip))):
             cleaned = re.sub(re.escape(control), "", cleaned, flags=re.IGNORECASE)
-        return cleaned.strip(" ，,。.!！\n\t"), "" if not use_outfit else self._get_busy_schedule_outfit()
+        return cleaned.strip(" ，,。.!！\n\t"), "" if not use_outfit else self._resolve_outfit_value(forced)
 
     def _build_selfie_prompt(
         self,
