@@ -3243,7 +3243,7 @@ class GiteeAIImagePlugin(Star):
 
     @filter.llm_tool()
     async def grok_generate_video(self, event: AstrMessageEvent, prompt: str):
-        """生成视频，两种方式：用户发送/引用了图片时，以该图作为视频首帧；没有图片时直接生成（自动使用预设的参考形象）。
+        """生成视频。用户发送或引用的图片会一并上传给视频服务；没有图片时按提示词直接生成。
         任务在后台执行，完成后系统会自动把视频发给用户并通知你，不要重复提交，也不要自行先生成参考图片。
 
         Args:
@@ -4791,7 +4791,7 @@ class GiteeAIImagePlugin(Star):
                 out.append(pid)
         return out
 
-    def _build_video_prompt(self, prompt: str) -> str:
+    def _build_video_prompt(self, prompt: str, *, has_image: bool = False) -> str:
         """视频提示词兜底：配置前缀 + 今日穿搭/时间光线。
 
         穿搭检测与自拍（生图）共用同一套配置与关键词
@@ -4799,35 +4799,37 @@ class GiteeAIImagePlugin(Star):
         提示词里出现临时穿搭词时今日穿搭自动留空；
         控制词会从提示词中剥离，不会传给视频模型。
 
+        has_image=True（发图/引用图生视频）：整段前缀不拼。图本身就是画面基准，
+        再补今日穿搭或当前光线会和图里的内容打架（首帧模式尤其明显）。
+        开关：features.video.prompt_prefix_skip_on_image（默认开）。
+
+        占位符是唯一开关：模板里没有 {today_outfit} / {lighting} 就不补对应内容，
+        代码不再自动追加（2026-10-23 起）。
+
         前缀与正文直连拼接，代码不附加任何换行；
         模板里的字面 \\n 会被翻译成真实换行，接缝间隔完全由模板控制。
         """
         user_prompt, outfit = self._prepare_selfie_prompt_context(prompt or "")
         user_prompt = self._expand_time_placeholders(user_prompt or "")
-        if not self._as_bool(
-            self._get_feature("video").get("prompt_prefix_enabled", True),
-            default=True,
+        vconf = self._get_feature("video")
+        if has_image and self._as_bool(
+            vconf.get("prompt_prefix_skip_on_image", True), default=True
         ):
+            # 带图：整段前缀不拼（穿搭、光线、画质词全都不要）
+            return user_prompt
+        if not self._as_bool(vconf.get("prompt_prefix_enabled", True), default=True):
             # 前缀开关关闭：自定义模板与内置默认都不使用，模板配置保留
             # （穿搭剥离与占位符扩展仍作用于用户提示词本身）
             return user_prompt
-        prefix = str(
-            self._get_feature("video").get("prompt_prefix", "") or ""
-        ).strip()
+        prefix = str(vconf.get("prompt_prefix", "") or "").strip()
         if not prefix:
             prefix = (
                 "真实生活感随手拍视频，手机手持拍摄质感，高清写实。\n"
                 "今日外显穿搭：{today_outfit}\n"
                 "当前时间光线：{lighting}\\n"
             )
-        has_outfit_placeholder = "{today_outfit}" in prefix
-        has_lighting_placeholder = "{lighting}" in prefix
         lighting = self._resolve_lighting_placeholder()
         filled = prefix.replace("{today_outfit}", outfit).replace("{lighting}", lighting)
-        if outfit and not has_outfit_placeholder:
-            filled = f"{filled}\n今日外显穿搭：{outfit}"
-        if not has_lighting_placeholder:
-            filled = f"{filled}\n当前时间光线：{lighting}"
         filled = self._expand_time_placeholders(filled)
         # 穿搭留空时清掉空值标签行，避免空"今日外显穿搭："标签送进视频模型
         filled = re.sub(r"(?m)^今日外显穿搭：\s*$\n?", "", filled).strip()
@@ -5227,7 +5229,7 @@ class GiteeAIImagePlugin(Star):
         image_bytes: bytes | None = None,
     ) -> tuple[str, str]:
         """沿 provider 链生成视频，返回 (video_url, used_pid)。"""
-        effective_prompt = self._build_video_prompt(prompt)
+        effective_prompt = self._build_video_prompt(prompt, has_image=bool(image_bytes))
         if effective_prompt != (prompt or "").strip():
             logger.debug("[视频] 兜底前缀已拼接: %s...", effective_prompt[:80])
         prompt = effective_prompt
@@ -6073,15 +6075,10 @@ class GiteeAIImagePlugin(Star):
 
         user_prompt, outfit = self._prepare_selfie_prompt_context(prompt, control_text)
         if prefix_enabled:
-            has_outfit_placeholder = "{today_outfit}" in prefix
-            has_lighting_placeholder = "{lighting}" in prefix
+            # 占位符是唯一开关：模板里没有 {today_outfit} / {lighting} 就不补对应内容
             prefix = prefix.replace("{today_outfit}", outfit)
             lighting = self._resolve_lighting_placeholder()
             prefix = prefix.replace("{lighting}", lighting)
-            if outfit and not has_outfit_placeholder:
-                prefix = f"{prefix}\n今日外显穿搭：{outfit}"
-            if not has_lighting_placeholder:
-                prefix = f"{prefix}\n当前时间光线：{lighting}"
             prefix = self._expand_time_placeholders(prefix)
         user_prompt = self._expand_time_placeholders(user_prompt or "日常照片")
         prefix = "\n".join(line.rstrip() for line in prefix.splitlines()).strip()

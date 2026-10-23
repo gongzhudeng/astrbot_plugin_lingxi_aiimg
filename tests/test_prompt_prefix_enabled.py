@@ -64,6 +64,75 @@ class PromptPrefixEnabledTests(unittest.IsolatedAsyncioTestCase):
         # 兜底模板结尾自带换行：正文独立成行
         self.assertIn("\n一只猫在窗台", out)
 
+    def test_video_prompt_skips_whole_prefix_when_image(self):
+        """带图生视频：整段前缀不拼（穿搭、光线、画质词都不要）。"""
+        _, plugin = _plugin(
+            {
+                "features": {
+                    "selfie": {"lighting_rules": LIGHTING_ALL_DAY},
+                    "video": {
+                        "prompt_prefix": "前缀{lighting}",
+                        "prompt_prefix_enabled": True,
+                    },
+                }
+            }
+        )
+        out = plugin._build_video_prompt("她笑了一下，抬眼看向镜头", has_image=True)
+        self.assertEqual(out, "她笑了一下，抬眼看向镜头")
+        self.assertNotIn("前缀", out)
+        self.assertNotIn("测试光线", out)
+
+    def test_video_prompt_skip_on_image_can_be_disabled(self):
+        _, plugin = _plugin(
+            {
+                "features": {
+                    "selfie": {"lighting_rules": LIGHTING_ALL_DAY},
+                    "video": {
+                        "prompt_prefix": "前缀{lighting}",
+                        "prompt_prefix_enabled": True,
+                        "prompt_prefix_skip_on_image": False,
+                    },
+                }
+            }
+        )
+        out = plugin._build_video_prompt("她笑了一下", has_image=True)
+        self.assertEqual(out, "前缀测试光线她笑了一下")
+
+    def test_video_prompt_no_auto_append_without_placeholders(self):
+        """模板里没写占位符 = 不要补，代码不再自动追加穿搭/光线。"""
+        _, plugin = _plugin(
+            {
+                "features": {
+                    "selfie": {"lighting_rules": LIGHTING_ALL_DAY},
+                    "video": {"prompt_prefix": "固定前缀，", "prompt_prefix_enabled": True},
+                }
+            }
+        )
+        out = plugin._build_video_prompt("一只猫在窗台")
+        self.assertEqual(out, "固定前缀，一只猫在窗台")
+        self.assertNotIn("测试光线", out)
+        self.assertNotIn("当前时间光线", out)
+        self.assertNotIn("今日外显穿搭", out)
+
+    def test_selfie_prompt_no_auto_append_without_placeholders(self):
+        """自拍前缀同样：删了占位符就别补。"""
+        _, plugin = _plugin(
+            {
+                "features": {
+                    "selfie": {
+                        "prompt_prefix": "固定自拍前缀，",
+                        "lighting_rules": LIGHTING_ALL_DAY,
+                        "prompt_prefix_enabled": True,
+                    }
+                }
+            }
+        )
+        out = plugin._build_selfie_prompt("在海边")
+        self.assertEqual(out, "固定自拍前缀，在海边")
+        self.assertNotIn("测试光线", out)
+        self.assertNotIn("当前时间光线", out)
+        self.assertNotIn("今日外显穿搭", out)
+
     def test_video_prompt_direct_concat_without_literal_newline(self):
         _, plugin = _plugin(
             {
