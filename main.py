@@ -2843,6 +2843,7 @@ class GiteeAIImagePlugin(Star):
         count: int = 1,
     ):
         """按用户要求生成、批量生成或编辑图片。
+        注意：调用前先用自然语气跟用户说一两句话，不要一声不吭直接调用！
 
         Args:
             prompt(string): 完整的生成或修改要求。可描述第一人称正在拍摄的画面，不强制露脸。
@@ -3244,6 +3245,7 @@ class GiteeAIImagePlugin(Star):
     @filter.llm_tool()
     async def grok_generate_video(self, event: AstrMessageEvent, prompt: str):
         """生成视频。用户发送或引用的图片会一并上传给视频服务；没有图片时按提示词直接生成。
+        注意：调用前先用自然语气跟用户说一两句话，不要一声不吭直接调用！
         任务在后台执行，完成后系统会自动把视频发给用户并通知你，不要重复提交，也不要自行先生成参考图片。
 
         Args:

@@ -2,6 +2,7 @@ import ast
 import asyncio
 import importlib.util
 import json
+import re
 import sys
 import types
 import unittest
@@ -994,14 +995,21 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_metadata_version_is_current(self):
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-        self.assertIn("version: 1.4.9", metadata)
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        latest = re.search(r"^## \[v([0-9.]+)\]", changelog, re.M)
+        self.assertIsNotNone(latest)
+        self.assertIn(f"version: {latest.group(1)}", metadata)
 
     def test_aiimg_tool_description_enforces_image_mode_rules(self):
         mod, _ = _load_module()
         description = mod.GiteeAIImagePlugin.aiimg_generate.__doc__ or ""
 
         summary, parameters = description.split("Args:", 1)
-        self.assertLess(len(summary.strip()), 40)
+        first_line = summary.strip().splitlines()[0]
+        self.assertLess(len(first_line), 40)
+        # 调用前必须先说话（避免一声不吭直接出图）
+        self.assertIn("注意：", summary)
+        self.assertIn("不要一声不吭直接调用", summary)
         self.assertIn("edit 禁止自行使用", parameters)
         self.assertIn("没有可编辑图片时不得使用", parameters)
         self.assertIn("自拍、日常拍照分享都可以", parameters)
@@ -1009,6 +1017,12 @@ class MainInitializeRequestModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("参考图缺失时报告失败，不得降级", parameters)
         self.assertIn("text 不允许自行使用", parameters)
         self.assertNotIn("过度暴露", parameters)
+
+    def test_video_tool_description_requires_pre_call_message(self):
+        mod, _ = _load_module()
+        description = mod.GiteeAIImagePlugin.grok_generate_video.__doc__ or ""
+        self.assertIn("注意：", description)
+        self.assertIn("不要一声不吭直接调用", description)
 
     def test_selfie_prompt_reference_note_removed(self):
         mod, _ = _load_module()
