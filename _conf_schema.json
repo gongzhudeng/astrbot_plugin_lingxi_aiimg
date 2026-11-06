@@ -1001,6 +1001,31 @@
                         "description": "默认输出尺寸",
                         "default": "4096x4096"
                     },
+                    "response_format": {
+                        "type": "string",
+                        "description": "返回载体格式",
+                        "options": [
+                            "auto",
+                            "b64_json",
+                            "url"
+                        ],
+                        "hint": "auto（推荐）：不向服务商声明，由它自己决定。b64_json：要求以 base64 返回（旧版写死的值，会让动图等格式被压成静态图）。url：要求返回下载链接。",
+                        "default": "auto"
+                    },
+                    "output_format": {
+                        "type": "string",
+                        "description": "图片输出格式",
+                        "options": [
+                            "auto",
+                            "png",
+                            "jpeg",
+                            "webp",
+                            "gif",
+                            "svg"
+                        ],
+                        "hint": "auto（推荐）：不声明输出格式，服务商按提示词自行判断，例如提示词要求动图时返回 GIF（前提是该服务商支持）。指定具体格式时，不支持的服务商可能报错。",
+                        "default": "auto"
+                    },
                     "extra_body": {
                         "type": "object",
                         "description": "额外请求体（高级）",

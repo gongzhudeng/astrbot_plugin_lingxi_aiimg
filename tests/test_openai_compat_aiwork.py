@@ -84,9 +84,21 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
         self.assertEqual(fields["model"], "gpt-image-2")
         self.assertEqual(fields["prompt"], "额外加个苹果")
         self.assertEqual(fields["size"], "1024x1024")
-        self.assertEqual(fields["response_format"], "b64_json")
+        # 默认 auto：不向上游声明格式，避免把动图等结果锁死成静态图
+        self.assertNotIn("response_format", fields)
         self.assertEqual(fields["quality"], "auto")
         self.assertEqual(fields["n"], "1")
+
+    def test_build_aiwork_edit_form_fields_respects_explicit_format(self):
+        fields = self.mod.build_aiwork_edit_form_fields(
+            model="gpt-image-2",
+            prompt="动图",
+            size="1024x1024",
+            format_fields={"output_format": "gif"},
+        )
+
+        self.assertEqual(fields["output_format"], "gif")
+        self.assertNotIn("response_format", fields)
 
     def test_build_aiwork_edit_form_fields_forces_single_output(self):
         fields = self.mod.build_aiwork_edit_form_fields(
@@ -170,7 +182,7 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
 
         self.assertEqual(captured["url"], "https://aiwork.fans/v1/images/edits")
         self.assertEqual(captured["api_key"], "sk-test")
-        self.assertEqual(captured["data"]["response_format"], "b64_json")
+        self.assertEqual(captured["data"]["n"], "1")
         self.assertEqual(
             [field for field, _ in captured["files"]], ["image[]", "image[]"]
         )
@@ -187,7 +199,7 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
         )
         self.assertEqual(backend.base_url, "https://aiwork.fans/v1")
 
-    def test_aiwork_generate_payload_uses_b64_response_format(self):
+    def test_generate_payload_omits_format_by_default(self):
         captured = {}
 
         class FakeImageManager:
@@ -224,7 +236,53 @@ class OpenAICompatAIWorkTests(unittest.TestCase):
 
         self.assertEqual(captured["url"], "https://aiwork.fans/v1/images/generations")
         self.assertEqual(captured["api_key"], "sk-test")
-        self.assertEqual(captured["payload"]["response_format"], "b64_json")
+        self.assertNotIn("response_format", captured["payload"])
+        self.assertNotIn("output_format", captured["payload"])
+
+    def test_generate_payload_passes_configured_output_format(self):
+        captured = {}
+
+        class FakeImageManager:
+            async def save_base64_image(self, value):
+                return Path("out.gif")
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"data":[{"b64_json":"ok"}]}'
+            headers = {"content-type": "application/json"}
+            content = b""
+
+            def json(self):
+                return {"data": [{"b64_json": "ok"}]}
+
+        backend = self.mod.OpenAICompatBackend(
+            imgr=FakeImageManager(),
+            base_url="https://aiwork.fans/v1",
+            api_keys=["sk-test"],
+            default_model="gpt-image-2",
+            output_format="gif",
+            response_format="url",
+        )
+
+        async def fake_post(url, api_key, payload):
+            captured["payload"] = payload
+            return FakeResponse()
+
+        backend._raw_post_json = fake_post
+
+        import asyncio
+
+        asyncio.run(backend.generate("画个动图", size="1024x1024"))
+
+        self.assertEqual(captured["payload"]["output_format"], "gif")
+        self.assertEqual(captured["payload"]["response_format"], "url")
+
+    def test_status_502_is_not_retried(self):
+        # 502 多半是网关「上游已生成、结果回传失败」，重试会重复计费
+        self.assertFalse(self.mod.OpenAICompatBackend._is_retryable_http_status(502))
+        self.assertTrue(self.mod.OpenAICompatBackend._is_retryable_http_status(429))
+        self.assertTrue(self.mod.OpenAICompatBackend._is_retryable_http_status(500))
+        self.assertTrue(self.mod.OpenAICompatBackend._is_retryable_http_status(503))
 
     def test_aiwork_generate_payload_forces_single_output(self):
         captured = {}

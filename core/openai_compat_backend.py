@@ -141,21 +141,47 @@ def is_aiwork_base_url(base_url: str) -> bool:
     return host == "aiwork.fans" or host.endswith(".aiwork.fans")
 
 
+_SUPPORTED_RESPONSE_FORMATS = ("b64_json", "url")
+_SUPPORTED_OUTPUT_FORMATS = ("png", "jpeg", "webp", "gif", "svg")
+
+
+def normalize_response_format(value: str | None) -> str:
+    """归一化返回载体格式；auto 表示不向上游声明，交给它自己决定。"""
+    text = str(value or "").strip().lower()
+    if not text or text in {"auto", "default", "none"}:
+        return "auto"
+    text = {"base64": "b64_json", "b64": "b64_json", "json": "b64_json"}.get(
+        text, text
+    )
+    return text if text in _SUPPORTED_RESPONSE_FORMATS else "auto"
+
+
+def normalize_output_format(value: str | None) -> str:
+    """归一化图片输出格式；auto 表示不向上游声明，交给它自己决定。"""
+    text = str(value or "").strip().lower()
+    if not text or text in {"auto", "default", "none"}:
+        return "auto"
+    text = {"jpg": "jpeg"}.get(text, text)
+    return text if text in _SUPPORTED_OUTPUT_FORMATS else "auto"
+
+
 def build_aiwork_edit_form_fields(
     *,
     model: str,
     prompt: str,
     size: str,
     extra_body: dict | None = None,
+    format_fields: dict[str, str] | None = None,
 ) -> dict[str, str]:
     fields: dict[str, object] = {
         "model": model,
         "prompt": prompt,
         "size": size,
-        "response_format": "b64_json",
         "quality": "auto",
         "n": "1",
     }
+    # 格式字段由 provider 配置决定；auto 时这里不带，避免把上游锁死成静态图。
+    fields.update(format_fields or {})
     fields.update(extra_body or {})
     fields["n"] = "1"
     return {k: str(v) for k, v in fields.items()}
@@ -278,6 +304,8 @@ class OpenAICompatBackend:
         proxy_url: str | None = None,
         allowed_sizes: list[str] | None = None,
         ratio_default_sizes: dict[str, str] | None = None,
+        response_format: str = "auto",
+        output_format: str = "auto",
     ):
         self.imgr = imgr
         self.base_url = normalize_openai_compat_base_url(base_url)
@@ -290,6 +318,8 @@ class OpenAICompatBackend:
         )
         self.supports_edit = bool(supports_edit)
         self.extra_body = extra_body or {}
+        self.response_format = normalize_response_format(response_format)
+        self.output_format = normalize_output_format(output_format)
         self.proxy_url = str(proxy_url or "").strip() or None
         self.allowed_sizes = [
             normalize_size_text(s)
@@ -502,8 +532,27 @@ class OpenAICompatBackend:
         )
         return self._raw_client
 
+    def _format_request_fields(self) -> dict[str, str]:
+        """按 provider 配置追加格式字段；auto 时一个都不写。
+
+        历史版本无条件写死 response_format=b64_json，等于替服务商决定了
+        「返回静态图片」，动图等其它格式的请求会被压成静态图；配置成 auto
+        后不再替上游做决定，由它按提示词自己选。
+        """
+        fields: dict[str, str] = {}
+        if self.response_format != "auto":
+            fields["response_format"] = self.response_format
+        if self.output_format != "auto":
+            fields["output_format"] = self.output_format
+        return fields
+
     @staticmethod
     def _is_retryable_http_status(status: int) -> bool:
+        # 502 常见于中转网关「上游已生成、但结果转码/回传失败」，
+        # 此时上游往往已经实际出图并计费（部分网关会明确提示「请勿自动重新生成」），
+        # 重试只会重复花钱，因此不重试。
+        if status == 502:
+            return False
         return status == 429 or status >= 500
 
     async def _raw_post_json(
@@ -690,8 +739,8 @@ class OpenAICompatBackend:
             "model": final_model,
             "prompt": prompt,
             "size": final_size,
-            "response_format": "b64_json",
         }
+        payload.update(self._format_request_fields())
         eb = {}
         eb.update(self.extra_body)
         eb.update(extra_body or {})
@@ -781,8 +830,8 @@ class OpenAICompatBackend:
             "model": final_model,
             "prompt": prompt,
             "size": final_size,
-            "response_format": "b64_json",
         }
+        form_data.update(self._format_request_fields())
         eb = {}
         eb.update(self.extra_body)
         eb.update(extra_body or {})
@@ -799,6 +848,7 @@ class OpenAICompatBackend:
                 prompt=prompt,
                 size=final_size,
                 extra_body=eb,
+                format_fields=self._format_request_fields(),
             )
         else:
             str_data = {k: str(v) for k, v in form_data.items()}

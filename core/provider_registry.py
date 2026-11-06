@@ -519,6 +519,8 @@ class ProviderRegistry:
                 supports_edit=bool(conf.get("supports_edit", True)),
                 extra_body=_as_dict(conf.get("extra_body")) or None,
                 proxy_url=str(conf.get("proxy_url") or "").strip() or None,
+                response_format=str(conf.get("response_format") or "auto").strip(),
+                output_format=str(conf.get("output_format") or "auto").strip(),
             )
 
         if template_key == "openai_full_url_images":
@@ -555,6 +557,8 @@ class ProviderRegistry:
                 supports_edit=bool(conf.get("supports_edit", False)),
                 extra_body=_as_dict(conf.get("extra_body")) or None,
                 proxy_url=str(conf.get("proxy_url") or "").strip() or None,
+                response_format=str(conf.get("response_format") or "auto").strip(),
+                output_format=str(conf.get("output_format") or "auto").strip(),
             )
 
         if template_key in {"openai_chat", "grok_chat", "gemini_openai_chat"}:
